@@ -18,6 +18,7 @@ from sqlalchemy import (
     Boolean,
     Date,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     String,
@@ -94,12 +95,15 @@ class Entry(Base):
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
-class DailyReflection(Base):
-    __tablename__ = "daily_reflections"
+class DailyLog(Base):
+    """1日ごとのコンディション記録（睡眠時間・気分）。ルーティンとは独立。"""
+
+    __tablename__ = "daily_logs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     date: Mapped[date] = mapped_column(Date, nullable=False, unique=True, index=True)
-    note: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    sleep_hours: Mapped[float | None] = mapped_column(Float, nullable=True)
+    mood: Mapped[str | None] = mapped_column(String(10), nullable=True)  # 'good'|'bad'
 
 
 def init_db() -> None:
@@ -214,26 +218,56 @@ def get_all_entries() -> list[tuple[int, date, str]]:
         return [(rid, d, status) for rid, d, status in rows]
 
 
-# --- DailyReflection --------------------------------------------------------
+# --- DailyLog（睡眠時間・気分）---------------------------------------------
 
-def get_reflection(day: date) -> str:
-    """指定日のふりかえりメモを返す（無ければ空文字）。"""
+VALID_MOODS = ("good", "bad")
+
+
+def get_daily_log(day: date) -> tuple[float | None, str | None]:
+    """指定日の (sleep_hours, mood) を返す。未記入は (None, None)。"""
     with Session() as s:
-        r = s.scalar(select(DailyReflection).where(DailyReflection.date == day))
-        return r.note if r else ""
-
-
-def upsert_reflection(day: date, note: str) -> None:
-    """ふりかえりメモを保存（upsert）。空文字なら既存を削除して未記入に戻す。"""
-    with Session() as s:
-        r = s.scalar(select(DailyReflection).where(DailyReflection.date == day))
-        if not (note or "").strip():
-            if r is not None:
-                s.delete(r)
-                s.commit()
-            return
+        r = s.scalar(select(DailyLog).where(DailyLog.date == day))
         if r is None:
-            s.add(DailyReflection(date=day, note=note))
-        else:
-            r.note = note
+            return (None, None)
+        return (r.sleep_hours, r.mood)
+
+
+def _set_daily_field(day: date, field: str, value) -> None:
+    """DailyLog の1フィールドを upsert する。両フィールドとも空なら行を削除。"""
+    with Session() as s:
+        r = s.scalar(select(DailyLog).where(DailyLog.date == day))
+        if r is None:
+            if value is None:
+                return
+            r = DailyLog(date=day)
+            setattr(r, field, value)
+            s.add(r)
+            s.commit()
+            return
+        setattr(r, field, value)
+        if r.sleep_hours is None and r.mood is None:
+            s.delete(r)
         s.commit()
+
+
+def set_sleep(day: date, hours: float | None) -> None:
+    """睡眠時間（時間）を保存。None で記録取消。"""
+    _set_daily_field(day, "sleep_hours", hours)
+
+
+def set_mood(day: date, mood: str | None) -> None:
+    """気分（'good'|'bad'）を保存。None で記録取消。"""
+    if mood is not None and mood not in VALID_MOODS:
+        raise ValueError(f"不正な mood: {mood!r}")
+    _set_daily_field(day, "mood", mood)
+
+
+def get_daily_logs_range(start: date, end: date) -> list[tuple[date, float | None, str | None]]:
+    """[start, end] の DailyLog を (date, sleep_hours, mood) で返す（集計用）。"""
+    with Session() as s:
+        rows = s.execute(
+            select(DailyLog.date, DailyLog.sleep_hours, DailyLog.mood)
+            .where(DailyLog.date >= start, DailyLog.date <= end)
+            .order_by(DailyLog.date)
+        ).all()
+        return [(d, sh, m) for d, sh, m in rows]
