@@ -51,11 +51,19 @@ def now_jst() -> datetime:
 # --- 接続 -------------------------------------------------------------------
 
 def _database_url() -> str:
+    # ローカル: .env / 環境変数。Streamlit Cloud: Secrets（環境変数にも露出するが念のため両対応）。
     url = os.getenv("DATABASE_URL")
     if not url:
+        try:
+            import streamlit as st
+
+            url = st.secrets.get("DATABASE_URL")
+        except Exception:
+            url = None
+    if not url:
         raise RuntimeError(
-            "DATABASE_URL が設定されていません。.env に Neon の接続文字列を設定してください"
-            "（.env.example 参照）。"
+            "DATABASE_URL が設定されていません。ローカルは .env、Streamlit Cloud は Secrets に"
+            " Neon の接続文字列を設定してください（.env.example 参照）。"
         )
     return url
 
