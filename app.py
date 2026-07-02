@@ -211,21 +211,6 @@ with tab_today:
         st.markdown(render_strip(routines, 14, day), unsafe_allow_html=True)
 
         st.divider()
-        st.caption("ルーティン（タップで即保存）")
-        current = db.get_entries_for_day(day)
-        for r in routines:
-            key = f"seg_{r.id}_{day.isoformat()}"
-            st.segmented_control(
-                r.name,
-                options=services.STATUS_ORDER,
-                format_func=lambda s: services.STATUS_LABELS[s],
-                default=current.get(r.id),
-                key=key,
-                on_change=_save_entry,
-                args=(r.id, day, key),
-            )
-
-        st.divider()
         st.caption("今日のコンディション")
         sleep, mood = db.get_daily_log(day)
         col_s, col_m = st.columns(2)
@@ -252,6 +237,21 @@ with tab_today:
                 key=mkey,
                 on_change=_save_mood,
                 args=(day, mkey),
+            )
+
+        st.divider()
+        st.caption("ルーティン（タップで即保存）")
+        current = db.get_entries_for_day(day)
+        for r in routines:
+            key = f"seg_{r.id}_{day.isoformat()}"
+            st.segmented_control(
+                r.name,
+                options=services.STATUS_ORDER,
+                format_func=lambda s: services.STATUS_LABELS[s],
+                default=current.get(r.id),
+                key=key,
+                on_change=_save_entry,
+                args=(r.id, day, key),
             )
 
     st.markdown(legend_html(), unsafe_allow_html=True)
