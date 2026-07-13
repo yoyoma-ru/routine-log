@@ -306,7 +306,7 @@ with tab_stats:
 
 
 with tab_manage:
-    st.caption("表を直接編集できます。行の追加・名前変更・並び順・アーカイブをまとめて行い、保存してください。")
+    st.caption("表を直接編集できます。編集中は保存されません。行の追加・名前変更・並び順・アーカイブをまとめて行い、最後に「保存」を押してください。")
     all_routines = db.list_routines(include_archived=True)
     import pandas as pd
 
@@ -317,20 +317,24 @@ with tab_manage:
         ],
         columns=["id", "ルーティン名", "並び順", "アーカイブ"],
     )
-    edited = st.data_editor(
-        df,
-        num_rows="dynamic",
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "id": st.column_config.NumberColumn("id", disabled=True),
-            "ルーティン名": st.column_config.TextColumn("ルーティン名", required=True),
-            "並び順": st.column_config.NumberColumn("並び順", min_value=0, step=1),
-            "アーカイブ": st.column_config.CheckboxColumn("アーカイブ"),
-        },
-        key="routine_editor",
-    )
-    if st.button("保存", type="primary"):
+    # フォームで囲むことで、セル編集ごとの再実行・保存を止め、「保存」押下時のみ確定する。
+    with st.form("routine_form"):
+        edited = st.data_editor(
+            df,
+            num_rows="dynamic",
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "id": st.column_config.NumberColumn("id", disabled=True),
+                "ルーティン名": st.column_config.TextColumn("ルーティン名", required=True),
+                "並び順": st.column_config.NumberColumn("並び順", min_value=0, step=1),
+                "アーカイブ": st.column_config.CheckboxColumn("アーカイブ"),
+            },
+            key="routine_editor",
+        )
+        submitted = st.form_submit_button("保存", type="primary")
+
+    if submitted:
         rows = [
             {
                 "id": row["id"],
