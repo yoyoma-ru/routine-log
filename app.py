@@ -7,8 +7,12 @@
 from datetime import timedelta
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 st.set_page_config(page_title="routine-log", page_icon="🌱", layout="wide")
+
+# 別アプリ（学習記録）を埋め込むタブのURL。?embed=true でヘッダ等を外した埋め込み表示にする。
+STUDY_APP_URL = "https://my-study-app-yoyo.streamlit.app/?embed=true"
 
 # DATABASE_URL 未設定や接続不可は、画面上で分かりやすく案内する。
 try:
@@ -177,8 +181,8 @@ def legend_html(with_daily: bool = False) -> str:
 st.markdown(HEATMAP_CSS, unsafe_allow_html=True)
 st.title("🌱 routine-log")
 
-tab_today, tab_heat, tab_stats, tab_manage = st.tabs(
-    ["今日", "ヒートマップ", "集計・傾向", "ルーティン管理"]
+tab_today, tab_heat, tab_stats, tab_manage, tab_study = st.tabs(
+    ["今日", "ヒートマップ", "集計・傾向", "ルーティン管理", "学習"]
 )
 
 
@@ -364,3 +368,12 @@ with tab_manage:
         services.apply_routine_edits(rows, all_routines)
         st.success("保存しました。")
         st.rerun()
+
+
+with tab_study:
+    st.caption("学習記録アプリ（別アプリを埋め込み表示）")
+    components.iframe(STUDY_APP_URL, height=900, scrolling=True)
+    st.markdown(
+        f"[別タブで開く ↗]({STUDY_APP_URL.replace('?embed=true', '')})",
+        unsafe_allow_html=False,
+    )
