@@ -4,6 +4,8 @@
 タブ構成: 今日 / ヒートマップ / 集計・傾向 / ルーティン管理。
 """
 
+from datetime import timedelta
+
 import streamlit as st
 
 st.set_page_config(page_title="routine-log", page_icon="🌱", layout="wide")
@@ -66,6 +68,11 @@ def _mark_html(status: str | None) -> str:
     if status == "none":
         return '<div class="rl-mark rl-none">✕</div>'
     return ""  # 未記入
+
+
+# セル/凡例で使う記号（今日タブの入力ボタンとヒートマップで共通）
+STATUS_SYMBOL = {"done": "■", "small": "◤", "none": "✕"}
+MOOD_SYMBOL = {"good": "☺", "bad": "☹"}
 
 
 def _mood_html(mood: str | None) -> str:
@@ -165,20 +172,6 @@ def legend_html(with_daily: bool = False) -> str:
     return f'<div class="rl-legend">{items}</div>'
 
 
-# ---- コールバック ----------------------------------------------------------
-
-def _save_entry(rid: int, day, key: str):
-    db.set_entry(rid, day, st.session_state.get(key))
-
-
-def _save_sleep(day, key: str):
-    db.set_sleep(day, st.session_state.get(key))
-
-
-def _save_mood(day, key: str):
-    db.set_mood(day, st.session_state.get(key))
-
-
 # ---- タブ本体 --------------------------------------------------------------
 
 st.markdown(HEATMAP_CSS, unsafe_allow_html=True)
@@ -189,8 +182,14 @@ tab_today, tab_heat, tab_stats, tab_manage = st.tabs(
 )
 
 
+DOW = ["月", "火", "水", "木", "金", "土", "日"]
+COLW = [1.5, 1, 1, 1]  # [ルーティン名, 各日×3]
+
+
 with tab_today:
-    day = st.date_input("日付", value=db.today(), format="YYYY/MM/DD")
+    day = st.date_input(
+        "基準日", value=db.today(), format="YYYY/MM/DD", help="この日＋前2日の3日分を表示します"
+    )
     routines = db.list_routines()
 
     if not routines:
@@ -201,58 +200,76 @@ with tab_today:
                 db.add_routine(name, sort_order=i + 1)
             st.rerun()
     else:
-        recorded, total = services.today_progress(day, routines)
-        streak = services.current_streak(day)
-        c1, c2 = st.columns(2)
-        c1.metric("今日の記録", f"{recorded} / {total}")
-        c2.metric("連続行動日数", f"{streak} 日")
-
         st.caption("直近2週間")
         st.markdown(render_strip(routines, 14, day), unsafe_allow_html=True)
-
         st.divider()
-        st.caption("今日のコンディション")
-        sleep, mood = db.get_daily_log(day)
-        col_s, col_m = st.columns(2)
-        with col_s:
-            skey = f"sleep_{day.isoformat()}"
-            st.number_input(
-                "睡眠時間（時間）",
-                min_value=0.0,
-                max_value=24.0,
-                step=0.5,
-                value=sleep,
-                key=skey,
-                on_change=_save_sleep,
-                args=(day, skey),
-                placeholder="例: 7.5",
-            )
-        with col_m:
-            mkey = f"mood_{day.isoformat()}"
-            st.segmented_control(
-                "今日の気分",
-                options=services.MOOD_ORDER,
-                format_func=lambda m: services.MOOD_LABELS[m],
-                default=mood,
-                key=mkey,
-                on_change=_save_mood,
-                args=(day, mkey),
-            )
 
-        st.divider()
-        st.caption("ルーティン（タップで即保存）")
-        current = db.get_entries_for_day(day)
-        for r in routines:
-            key = f"seg_{r.id}_{day.isoformat()}"
-            st.segmented_control(
-                r.name,
-                options=services.STATUS_ORDER,
-                format_func=lambda s: services.STATUS_LABELS[s],
-                default=current.get(r.id),
-                key=key,
-                on_change=_save_entry,
-                args=(r.id, day, key),
-            )
+        # 選択日＋前2日（左=古い → 右=選択日）
+        days3 = [day - timedelta(days=2), day - timedelta(days=1), day]
+        ent = {(rid, d): s for rid, d, s in db.get_entries_range(days3[0], days3[2])}
+        logs = {d: db.get_daily_log(d) for d in days3}
+
+        st.caption("編集中は保存されません。まとめて入力し、下の「保存」を押してください。")
+        with st.form("today_form"):
+            # ヘッダ（日付）
+            hcols = st.columns(COLW)
+            hcols[0].markdown("&nbsp;")
+            for i, d in enumerate(days3):
+                lbl = f"{d.month}/{d.day}（{DOW[d.weekday()]}）"
+                hcols[i + 1].markdown(f"**{lbl}** ・選択" if d == day else lbl)
+
+            # コンディション
+            st.caption("コンディション")
+            scols = st.columns(COLW)
+            scols[0].markdown("睡眠(h)")
+            for i, d in enumerate(days3):
+                scols[i + 1].number_input(
+                    "睡眠時間",
+                    min_value=0.0,
+                    max_value=24.0,
+                    step=0.5,
+                    value=logs[d][0],
+                    key=f"f_sleep_{d.isoformat()}",
+                    label_visibility="collapsed",
+                    placeholder="7.5",
+                )
+            mcols = st.columns(COLW)
+            mcols[0].markdown("気分")
+            for i, d in enumerate(days3):
+                mcols[i + 1].segmented_control(
+                    "気分",
+                    options=services.MOOD_ORDER,
+                    format_func=lambda m: MOOD_SYMBOL[m],
+                    default=logs[d][1],
+                    key=f"f_mood_{d.isoformat()}",
+                    label_visibility="collapsed",
+                )
+
+            # ルーティン
+            st.caption("ルーティン")
+            for r in routines:
+                rcols = st.columns(COLW)
+                rcols[0].markdown(r.name)
+                for i, d in enumerate(days3):
+                    rcols[i + 1].segmented_control(
+                        r.name,
+                        options=services.STATUS_ORDER,
+                        format_func=lambda s: STATUS_SYMBOL[s],
+                        default=ent.get((r.id, d)),
+                        key=f"f_seg_{r.id}_{d.isoformat()}",
+                        label_visibility="collapsed",
+                    )
+
+            submitted = st.form_submit_button("保存", type="primary")
+
+        if submitted:
+            for d in days3:
+                db.set_sleep(d, st.session_state.get(f"f_sleep_{d.isoformat()}"))
+                db.set_mood(d, st.session_state.get(f"f_mood_{d.isoformat()}"))
+                for r in routines:
+                    db.set_entry(r.id, d, st.session_state.get(f"f_seg_{r.id}_{d.isoformat()}"))
+            st.success("3日分を保存しました。")
+            st.rerun()
 
     st.markdown(legend_html(), unsafe_allow_html=True)
 
