@@ -6,6 +6,7 @@
 
 from datetime import timedelta
 
+import plotly.graph_objects as go
 import streamlit as st
 import streamlit.components.v1 as components
 
@@ -181,8 +182,8 @@ def legend_html(with_daily: bool = False) -> str:
 st.markdown(HEATMAP_CSS, unsafe_allow_html=True)
 st.title("🌱 routine-log")
 
-tab_today, tab_heat, tab_stats, tab_manage, tab_study = st.tabs(
-    ["今日", "ヒートマップ", "集計・傾向", "ルーティン管理", "学習"]
+tab_today, tab_heat, tab_stats, tab_manage, tab_weight, tab_study = st.tabs(
+    ["今日", "ヒートマップ", "集計・傾向", "ルーティン管理", "体重", "学習"]
 )
 
 
@@ -368,6 +369,77 @@ with tab_manage:
         services.apply_routine_edits(rows, all_routines)
         st.success("保存しました。")
         st.rerun()
+
+
+with tab_weight:
+    # 記録フォーム（保存ボタン方式）
+    with st.form("weight_form"):
+        wc1, wc2, wc3 = st.columns([2, 2, 1])
+        w_day = wc1.date_input("日付", value=db.today(), format="YYYY/MM/DD")
+        existing = dict(db.get_weight_logs()).get(w_day)
+        w_val = wc2.number_input(
+            "体重 (kg)", min_value=0.0, max_value=300.0, step=0.1, value=existing, placeholder="60.0"
+        )
+        wc3.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+        rec = wc3.form_submit_button("記録", type="primary")
+    if rec:
+        db.set_weight(w_day, w_val)
+        st.success(f"{w_day.isoformat()} の体重を記録しました。")
+        st.rerun()
+
+    # 目標設定
+    target_w, target_d = db.get_weight_goal()
+    with st.expander("目標を設定"):
+        with st.form("weight_goal_form"):
+            gc1, gc2 = st.columns(2)
+            g_w = gc1.number_input(
+                "目標体重 (kg)", min_value=0.0, max_value=300.0, step=0.1,
+                value=target_w if target_w is not None else 55.0,
+            )
+            g_d = gc2.date_input(
+                "目標日", value=target_d if target_d else (db.today() + timedelta(days=90)),
+                format="YYYY/MM/DD",
+            )
+            if st.form_submit_button("目標を保存", type="primary"):
+                db.set_weight_goal(g_w, g_d)
+                st.success("目標を保存しました。")
+                st.rerun()
+
+    # グラフ
+    logs = db.get_weight_logs()
+    if not logs:
+        st.info("体重を記録するとグラフが表示されます。")
+    else:
+        series = services.weight_series(logs, target_w, target_d)
+        fig = go.Figure()
+        ax = [d for d, _w in series["actual"]]
+        ay = [w for _d, w in series["actual"]]
+        fig.add_trace(
+            go.Scatter(x=ax, y=ay, mode="lines+markers", name="実績体重",
+                       line=dict(color="#378ADD", width=2))
+        )
+        if series["target"]:
+            tx = [d for d, _w in series["target"]]
+            ty = [w for _d, w in series["target"]]
+            fig.add_trace(
+                go.Scatter(x=tx, y=ty, mode="lines", name="目標ライン",
+                           line=dict(color="#E24B4A", width=2, dash="dash"))
+            )
+        if series["forecast"]:
+            fx = [d for d, _w in series["forecast"]]
+            fy = [w for _d, w in series["forecast"]]
+            fig.add_trace(
+                go.Scatter(x=fx, y=fy, mode="lines", name="予測トレンド",
+                           line=dict(color="#639922", width=2, dash="dot"))
+            )
+        fig.update_layout(
+            hovermode="x unified",
+            height=420,
+            margin=dict(l=10, r=10, t=30, b=10),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
+            yaxis_title="体重 (kg)",
+        )
+        st.plotly_chart(fig, use_container_width=True)
 
 
 with tab_study:

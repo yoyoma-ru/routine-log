@@ -11,6 +11,7 @@ DB接続の詳細は知らず、db.py の関数だけを呼ぶ。
 
 from datetime import date, timedelta
 
+import numpy as np
 import pandas as pd
 
 import db
@@ -167,6 +168,49 @@ def _trend_symbol(recent: float | None, prev: float | None) -> str:
     if diff < -0.1:
         return "↓"
     return "→"
+
+
+# --- 体重グラフ用データ -----------------------------------------------------
+
+def weight_series(
+    logs: list[tuple[date, float]],
+    target_weight: float | None,
+    target_date: date | None,
+) -> dict:
+    """体重グラフ用の3系列を返す。
+
+    戻り値:
+      actual   … [(date, weight)]（昇順）
+      target   … 目標ライン [(first_date, first_weight), (target_date, target_weight)]（両方揃う時のみ、無ければ None）
+      forecast … 実績の最小二乗回帰を [first_date .. max(last_date, target_date)] に延長した [(date, value)]
+                 （実績2点未満は None）
+    """
+    actual = sorted(logs, key=lambda t: t[0])
+    result: dict = {"actual": actual, "target": None, "forecast": None}
+    if not actual:
+        return result
+
+    first_date, first_weight = actual[0]
+    last_date = actual[-1][0]
+
+    # 目標ライン（最初の実績点 → 目標体重・目標日）
+    if target_weight is not None and target_date is not None:
+        result["target"] = [(first_date, first_weight), (target_date, target_weight)]
+
+    # 予測トレンド（実績の回帰直線）
+    if len(actual) >= 2:
+        xs = np.array([(d - first_date).days for d, _w in actual], dtype=float)
+        ys = np.array([w for _d, w in actual], dtype=float)
+        slope, intercept = np.polyfit(xs, ys, 1)
+        end_date = max(last_date, target_date) if target_date else last_date
+        span = (end_date - first_date).days
+        forecast = [
+            (first_date + timedelta(days=i), round(float(intercept + slope * i), 2))
+            for i in range(span + 1)
+        ]
+        result["forecast"] = forecast
+
+    return result
 
 
 # --- ルーティン管理（data_editor の差分適用）-------------------------------

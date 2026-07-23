@@ -114,6 +114,25 @@ class DailyLog(Base):
     mood: Mapped[str | None] = mapped_column(String(10), nullable=True)  # 'good'|'bad'
 
 
+class WeightLog(Base):
+    """1日ごとの体重記録（kg）。"""
+
+    __tablename__ = "weight_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    date: Mapped[date] = mapped_column(Date, nullable=False, unique=True, index=True)
+    weight: Mapped[float] = mapped_column(Float, nullable=False)
+
+
+class Settings(Base):
+    """汎用の設定を key-value で保持（体重の目標体重・目標日など）。"""
+
+    __tablename__ = "settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+
+
 def init_db() -> None:
     """全テーブルを作成（既存ならスキップ）。init_db.py から呼ぶ。"""
     Base.metadata.create_all(_engine)
@@ -279,3 +298,62 @@ def get_daily_logs_range(start: date, end: date) -> list[tuple[date, float | Non
             .order_by(DailyLog.date)
         ).all()
         return [(d, sh, m) for d, sh, m in rows]
+
+
+# --- WeightLog（体重）------------------------------------------------------
+
+def get_weight_logs() -> list[tuple[date, float]]:
+    """全期間の体重を (date, weight) で date 昇順に返す。"""
+    with Session() as s:
+        rows = s.execute(
+            select(WeightLog.date, WeightLog.weight).order_by(WeightLog.date)
+        ).all()
+        return [(d, w) for d, w in rows]
+
+
+def set_weight(day: date, weight: float | None) -> None:
+    """体重を保存（upsert）。weight が None ならその日の記録を削除。"""
+    with Session() as s:
+        r = s.scalar(select(WeightLog).where(WeightLog.date == day))
+        if weight is None:
+            if r is not None:
+                s.delete(r)
+                s.commit()
+            return
+        if r is None:
+            s.add(WeightLog(date=day, weight=weight))
+        else:
+            r.weight = weight
+        s.commit()
+
+
+# --- Settings（key-value）---------------------------------------------------
+
+def get_setting(key: str) -> str | None:
+    with Session() as s:
+        r = s.scalar(select(Settings).where(Settings.key == key))
+        return r.value if r else None
+
+
+def set_setting(key: str, value: str) -> None:
+    with Session() as s:
+        r = s.scalar(select(Settings).where(Settings.key == key))
+        if r is None:
+            s.add(Settings(key=key, value=value))
+        else:
+            r.value = value
+        s.commit()
+
+
+def get_weight_goal() -> tuple[float | None, date | None]:
+    """(目標体重, 目標日) を返す。未設定は None。"""
+    w = get_setting("weight_target")
+    d = get_setting("weight_target_date")
+    target_w = float(w) if w else None
+    target_d = date.fromisoformat(d) if d else None
+    return (target_w, target_d)
+
+
+def set_weight_goal(target_weight: float, target_date: date) -> None:
+    set_setting("weight_target", str(target_weight))
+    set_setting("weight_target_date", target_date.isoformat())

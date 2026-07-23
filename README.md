@@ -59,6 +59,8 @@ Streamlit Community Cloud にデプロイする場合：
 - `routines` … ルーティン（name / sort_order / archived / archived_at / created_at）
 - `entries` … 日次の記録（routine_id × date でユニーク、status = done|small|none、note）
 - `daily_logs` … その日のコンディション（date ユニーク、sleep_hours / mood = good|bad）
+- `weight_logs` … その日の体重（date ユニーク、weight kg）
+- `settings` … 汎用設定 key-value（体重の目標体重・目標日など）
 
 すべて JST 基準で日付を扱う。ヒートマップ（ヒートマップタブ）は日付を縦・ルーティンを横に並べ、
 右端に睡眠時間（数値）と気分（☺良い／☹悪い）の列を表示する。
