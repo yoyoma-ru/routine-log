@@ -38,9 +38,9 @@ HEATMAP_CSS = """
   border-right:1px solid currentColor;border-bottom:1px solid currentColor;
   font-size:11px;opacity:.6;display:flex;align-items:flex-end;justify-content:center;padding-bottom:4px;}
 .rl-head{position:sticky;top:0;z-index:2;background:var(--background-color);
-  border-bottom:1px solid currentColor;font-size:13px;
-  display:flex;align-items:flex-start;justify-content:center;padding:6px 0;
-  writing-mode:vertical-rl;text-orientation:upright;letter-spacing:1px;white-space:nowrap;overflow:hidden;}
+  border-bottom:1px solid currentColor;font-size:14px;line-height:1.15;
+  display:flex;align-items:flex-start;justify-content:center;padding:8px 2px;
+  writing-mode:vertical-rl;text-orientation:upright;letter-spacing:1.5px;white-space:nowrap;}
 .rl-date{position:sticky;left:0;z-index:1;background:var(--background-color);
   border-right:1px solid currentColor;border-bottom:0.5px solid rgba(128,128,128,.35);
   display:flex;align-items:center;padding:0 6px;font-size:11px;white-space:nowrap;opacity:.85;}
@@ -72,7 +72,7 @@ HEATMAP_CSS = """
 </style>
 """
 
-CELL = 26
+CELL = 28
 DATEW = 60
 
 
@@ -121,13 +121,13 @@ def render_heatmap(routines: list, days: int, end, show_daily: bool = False) -> 
     if show_daily:
         cols += f" {SLEEPW}px {MOODW}px"
 
-    head_h = 96
-    cells = [f'<div class="rl-corner">日付＼行動</div>']
+    # 見出しは高さ固定せず、名前の全長に合わせて伸ばす（切れ防止）。
+    cells = ['<div class="rl-corner">日付＼行動</div>']
     for r in routines:
-        cells.append(f'<div class="rl-head" style="height:{head_h}px" title="{r.name}">{r.name}</div>')
+        cells.append(f'<div class="rl-head" title="{r.name}">{r.name}</div>')
     if show_daily:
-        cells.append(f'<div class="rl-head" style="height:{head_h}px">睡眠</div>')
-        cells.append(f'<div class="rl-head" style="height:{head_h}px">気分</div>')
+        cells.append('<div class="rl-head">睡眠</div>')
+        cells.append('<div class="rl-head">気分</div>')
 
     dow = ["月", "火", "水", "木", "金", "土", "日"]
     today = db.today()
