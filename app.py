@@ -256,14 +256,16 @@ with tab_today:
                             head = f"{d.month}/{d.day}（{DOW[d.weekday()]}）"
                             st.markdown(f"**{head}**" + ("　·　選択中" if d == day else ""))
 
+                            _sleep = logs[d][0]
                             st.number_input(
-                                "睡眠(h)",
+                                "睡眠(h)" if _sleep is not None else "睡眠(h)（未入力）",
                                 min_value=0.0,
                                 max_value=24.0,
                                 step=0.5,
-                                value=logs[d][0],
+                                value=_sleep,
                                 key=f"f_sleep_{d.isoformat()}",
-                                placeholder="7.5",
+                                format="%.1f",
+                                placeholder="入力してください",
                             )
                             st.segmented_control(
                                 "気分",
