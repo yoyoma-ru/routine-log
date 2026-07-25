@@ -15,6 +15,9 @@ st.set_page_config(page_title="routine-log", page_icon="🌱", layout="centered"
 # 別アプリ（学習記録）を埋め込むタブのURL。?embed=true でヘッダ等を外した埋め込み表示にする。
 STUDY_APP_URL = "https://my-study-app-yoyo.streamlit.app/?embed=true"
 
+# 体重の選択肢: 63.0 → 54.0 を 0.1 刻み（表示は小数第1位）
+WEIGHT_OPTIONS = [round(63.0 - 0.1 * i, 1) for i in range(91)]
+
 # DATABASE_URL 未設定や接続不可は、画面上で分かりやすく案内する。
 try:
     import db
@@ -382,15 +385,23 @@ with tab_weight:
         wc1, wc2, wc3 = st.columns([2, 2, 1])
         w_day = wc1.date_input("日付", value=db.today(), format="YYYY/MM/DD")
         existing = dict(db.get_weight_logs()).get(w_day)
-        w_val = wc2.number_input(
-            "体重 (kg)", min_value=0.0, max_value=300.0, step=0.1, value=existing, placeholder="60.0"
+        idx = WEIGHT_OPTIONS.index(existing) if existing in WEIGHT_OPTIONS else None
+        w_val = wc2.selectbox(
+            "体重 (kg)",
+            WEIGHT_OPTIONS,
+            index=idx,
+            format_func=lambda x: f"{x:.1f}",
+            placeholder="選択",
         )
         wc3.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
         rec = wc3.form_submit_button("記録", type="primary")
     if rec:
-        db.set_weight(w_day, w_val)
-        st.success(f"{w_day.isoformat()} の体重を記録しました。")
-        st.rerun()
+        if w_val is None:
+            st.warning("体重を選択してください。")
+        else:
+            db.set_weight(w_day, w_val)
+            st.success(f"{w_day.isoformat()} の体重を {w_val:.1f} kg で記録しました。")
+            st.rerun()
 
     # 目標設定
     target_w, target_d = db.get_weight_goal()
@@ -421,28 +432,31 @@ with tab_weight:
         ay = [w for _d, w in series["actual"]]
         fig.add_trace(
             go.Scatter(x=ax, y=ay, mode="lines+markers", name="実績体重",
-                       line=dict(color="#378ADD", width=2))
+                       line=dict(color="#378ADD", width=2),
+                       hovertemplate="%{y:.1f} kg<extra>実績体重</extra>")
         )
         if series["target"]:
             tx = [d for d, _w in series["target"]]
             ty = [w for _d, w in series["target"]]
             fig.add_trace(
                 go.Scatter(x=tx, y=ty, mode="lines", name="目標ライン",
-                           line=dict(color="#E24B4A", width=2, dash="dash"))
+                           line=dict(color="#E24B4A", width=2, dash="dash"),
+                           hovertemplate="%{y:.1f} kg<extra>目標ライン</extra>")
             )
         if series["forecast"]:
             fx = [d for d, _w in series["forecast"]]
             fy = [w for _d, w in series["forecast"]]
             fig.add_trace(
                 go.Scatter(x=fx, y=fy, mode="lines", name="予測トレンド",
-                           line=dict(color="#639922", width=2, dash="dot"))
+                           line=dict(color="#639922", width=2, dash="dot"),
+                           hovertemplate="%{y:.1f} kg<extra>予測トレンド</extra>")
             )
         fig.update_layout(
             hovermode="x unified",
             height=420,
             margin=dict(l=10, r=10, t=30, b=10),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
-            yaxis_title="体重 (kg)",
+            yaxis=dict(title="体重 (kg)", tickformat=".1f"),
         )
         st.plotly_chart(fig, use_container_width=True)
 

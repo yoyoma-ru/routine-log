@@ -205,7 +205,7 @@ def weight_series(
         end_date = max(last_date, target_date) if target_date else last_date
         span = (end_date - first_date).days
         forecast = [
-            (first_date + timedelta(days=i), round(float(intercept + slope * i), 2))
+            (first_date + timedelta(days=i), round(float(intercept + slope * i), 1))
             for i in range(span + 1)
         ]
         result["forecast"] = forecast
