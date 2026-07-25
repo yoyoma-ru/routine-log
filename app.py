@@ -58,6 +58,9 @@ HEATMAP_CSS = """
 .rl-legend{display:flex;flex-wrap:wrap;gap:16px;margin-top:10px;font-size:12px;opacity:.8;}
 .rl-legend .box{width:16px;height:16px;border:0.5px solid rgba(128,128,128,.5);display:inline-flex;
   align-items:center;justify-content:center;vertical-align:-3px;margin-right:5px;font-size:11px;}
+.rl-recent-h{font-size:12px;opacity:.6;margin-bottom:6px;}
+.rl-only-mobile{display:none;}
+@media (max-width:640px){.rl-only-desktop{display:none;}.rl-only-mobile{display:block;}}
 </style>
 """
 
@@ -162,6 +165,21 @@ def render_strip(routines: list, days: int, end) -> str:
     return f'<div class="rl-stripgrid" style="grid-template-columns:{cols}">' + "".join(cells) + "</div>"
 
 
+def render_recent(routines: list, day) -> str:
+    """直近の帯をレスポンシブに返す。PCは2週間(14日)、スマホ幅は1週間(7日)を表示。"""
+    desktop = (
+        '<div class="rl-only-desktop"><div class="rl-recent-h">直近2週間</div>'
+        + render_strip(routines, 14, day)
+        + "</div>"
+    )
+    mobile = (
+        '<div class="rl-only-mobile"><div class="rl-recent-h">直近1週間</div>'
+        + render_strip(routines, 7, day)
+        + "</div>"
+    )
+    return desktop + mobile
+
+
 def legend_html(with_daily: bool = False) -> str:
     items = (
         '<span><span class="box rl-done"></span>完了</span>'
@@ -205,8 +223,7 @@ with tab_today:
                 db.add_routine(name, sort_order=i + 1)
             st.rerun()
     else:
-        st.caption("直近2週間")
-        st.markdown(render_strip(routines, 14, day), unsafe_allow_html=True)
+        st.markdown(render_recent(routines, day), unsafe_allow_html=True)
         st.divider()
 
         # 選択日＋前2日を「上=選択日 → 下=過去」の順にカードで縦積み
