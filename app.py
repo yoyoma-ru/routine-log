@@ -10,7 +10,7 @@ import plotly.graph_objects as go
 import streamlit as st
 import streamlit.components.v1 as components
 
-st.set_page_config(page_title="routine-log", page_icon="🌱", layout="wide")
+st.set_page_config(page_title="routine-log", page_icon="🌱", layout="centered")
 
 # 別アプリ（学習記録）を埋め込むタブのURL。?embed=true でヘッダ等を外した埋め込み表示にする。
 STUDY_APP_URL = "https://my-study-app-yoyo.streamlit.app/?embed=true"
@@ -77,6 +77,7 @@ def _mark_html(status: str | None) -> str:
 
 # セル/凡例で使う記号（今日タブの入力ボタンとヒートマップで共通）
 STATUS_SYMBOL = {"done": "■", "small": "◤", "none": "✕"}
+SHORT_STATUS = {"done": "完了", "small": "最低限", "none": "してない"}
 MOOD_SYMBOL = {"good": "☺", "bad": "☹"}
 
 
@@ -188,7 +189,6 @@ tab_today, tab_heat, tab_stats, tab_manage, tab_weight, tab_study = st.tabs(
 
 
 DOW = ["月", "火", "水", "木", "金", "土", "日"]
-COLW = [1.5, 1, 1, 1]  # [ルーティン名, 各日×3]
 
 
 with tab_today:
@@ -209,66 +209,54 @@ with tab_today:
         st.markdown(render_strip(routines, 14, day), unsafe_allow_html=True)
         st.divider()
 
-        # 選択日＋前2日（左=古い → 右=選択日）
-        days3 = [day - timedelta(days=2), day - timedelta(days=1), day]
-        ent = {(rid, d): s for rid, d, s in db.get_entries_range(days3[0], days3[2])}
-        logs = {d: db.get_daily_log(d) for d in days3}
+        # 選択日＋前2日を「上=選択日 → 下=過去」の順にカードで縦積み
+        disp_days = [day, day - timedelta(days=1), day - timedelta(days=2)]
+        ent = {
+            (rid, d): s
+            for rid, d, s in db.get_entries_range(day - timedelta(days=2), day)
+        }
+        logs = {d: db.get_daily_log(d) for d in disp_days}
 
         st.caption("編集中は保存されません。まとめて入力し、下の「保存」を押してください。")
         with st.form("today_form"):
-            # ヘッダ（日付）
-            hcols = st.columns(COLW)
-            hcols[0].markdown("&nbsp;")
-            for i, d in enumerate(days3):
-                lbl = f"{d.month}/{d.day}（{DOW[d.weekday()]}）"
-                hcols[i + 1].markdown(f"**{lbl}** ・選択" if d == day else lbl)
+            for d in disp_days:
+                with st.container(border=True):
+                    head = f"{d.month}/{d.day}（{DOW[d.weekday()]}）"
+                    st.markdown(f"**{head}**" + ("　·　選択中" if d == day else ""))
 
-            # コンディション
-            st.caption("コンディション")
-            scols = st.columns(COLW)
-            scols[0].markdown("睡眠(h)")
-            for i, d in enumerate(days3):
-                scols[i + 1].number_input(
-                    "睡眠時間",
-                    min_value=0.0,
-                    max_value=24.0,
-                    step=0.5,
-                    value=logs[d][0],
-                    key=f"f_sleep_{d.isoformat()}",
-                    label_visibility="collapsed",
-                    placeholder="7.5",
-                )
-            mcols = st.columns(COLW)
-            mcols[0].markdown("気分")
-            for i, d in enumerate(days3):
-                mcols[i + 1].segmented_control(
-                    "気分",
-                    options=services.MOOD_ORDER,
-                    format_func=lambda m: MOOD_SYMBOL[m],
-                    default=logs[d][1],
-                    key=f"f_mood_{d.isoformat()}",
-                    label_visibility="collapsed",
-                )
-
-            # ルーティン
-            st.caption("ルーティン")
-            for r in routines:
-                rcols = st.columns(COLW)
-                rcols[0].markdown(r.name)
-                for i, d in enumerate(days3):
-                    rcols[i + 1].segmented_control(
-                        r.name,
-                        options=services.STATUS_ORDER,
-                        format_func=lambda s: STATUS_SYMBOL[s],
-                        default=ent.get((r.id, d)),
-                        key=f"f_seg_{r.id}_{d.isoformat()}",
-                        label_visibility="collapsed",
+                    cc1, cc2 = st.columns(2)
+                    cc1.number_input(
+                        "睡眠(h)",
+                        min_value=0.0,
+                        max_value=24.0,
+                        step=0.5,
+                        value=logs[d][0],
+                        key=f"f_sleep_{d.isoformat()}",
+                        placeholder="7.5",
+                    )
+                    cc2.segmented_control(
+                        "気分",
+                        options=services.MOOD_ORDER,
+                        format_func=lambda m: MOOD_SYMBOL[m],
+                        default=logs[d][1],
+                        key=f"f_mood_{d.isoformat()}",
                     )
 
-            submitted = st.form_submit_button("保存", type="primary")
+                    for r in routines:
+                        st.segmented_control(
+                            r.name,
+                            options=services.STATUS_ORDER,
+                            format_func=lambda s: f"{STATUS_SYMBOL[s]} {SHORT_STATUS[s]}",
+                            default=ent.get((r.id, d)),
+                            key=f"f_seg_{r.id}_{d.isoformat()}",
+                        )
+
+            submitted = st.form_submit_button(
+                "3日分を保存", type="primary", use_container_width=True
+            )
 
         if submitted:
-            for d in days3:
+            for d in disp_days:
                 db.set_sleep(d, st.session_state.get(f"f_sleep_{d.isoformat()}"))
                 db.set_mood(d, st.session_state.get(f"f_mood_{d.isoformat()}"))
                 for r in routines:
