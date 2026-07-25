@@ -1,7 +1,7 @@
 """フロントエンド（Streamlit UI）。
 
 画面の組み立てと入力受付・表示だけを行い、集計やDB操作は services / db に委ねる。
-タブ構成: 今日 / ヒートマップ / 集計・傾向 / ルーティン管理。
+タブ構成: 今日 / ヒートマップ / 体重 / 学習 / 管理。
 """
 
 from datetime import timedelta
@@ -15,8 +15,8 @@ st.set_page_config(page_title="routine-log", page_icon="🌱", layout="wide")
 # 別アプリ（学習記録）を埋め込むタブのURL。?embed=true でヘッダ等を外した埋め込み表示にする。
 STUDY_APP_URL = "https://my-study-app-yoyo.streamlit.app/?embed=true"
 
-# 体重の選択肢: 63.0 → 54.0 を 0.1 刻み（表示は小数第1位）
-WEIGHT_OPTIONS = [round(63.0 - 0.1 * i, 1) for i in range(91)]
+# 体重の選択肢: 62.0 → 54.0 を 0.1 刻み（表示は小数第1位）
+WEIGHT_OPTIONS = [round(62.0 - 0.1 * i, 1) for i in range(81)]
 
 # DATABASE_URL 未設定や接続不可は、画面上で分かりやすく案内する。
 try:
@@ -209,8 +209,8 @@ def legend_html(with_daily: bool = False) -> str:
 st.markdown(HEATMAP_CSS, unsafe_allow_html=True)
 st.title("🌱 routine-log")
 
-tab_today, tab_heat, tab_stats, tab_manage, tab_weight, tab_study = st.tabs(
-    ["今日", "ヒートマップ", "集計・傾向", "ルーティン管理", "体重", "学習"]
+tab_today, tab_heat, tab_weight, tab_study, tab_manage = st.tabs(
+    ["今日", "ヒートマップ", "体重", "学習", "管理"]
 )
 
 
@@ -309,39 +309,6 @@ with tab_heat:
             st.markdown(render_heatmap(archived, days, end), unsafe_allow_html=True)
 
     st.markdown(legend_html(with_daily=True), unsafe_allow_html=True)
-
-
-with tab_stats:
-    end = db.today()
-
-    cond = services.daily_condition_summary(end, days=30)
-    st.caption("睡眠・気分（直近30日）")
-    cc1, cc2 = st.columns(2)
-    cc1.metric(
-        "平均睡眠時間",
-        f"{cond['avg_sleep']} 時間" if cond["avg_sleep"] is not None else "—",
-        help=f"記録のある {cond['sleep_days']} 日の平均",
-    )
-    cc2.metric(
-        "気分が良い割合",
-        f"{cond['good_ratio']}%" if cond["good_ratio"] is not None else "—",
-        help=f"記録のある {cond['mood_days']} 日のうち",
-    )
-    st.divider()
-
-    active = db.list_routines()
-    st.caption("ルーティン")
-    if not active:
-        st.info("ルーティンを追加すると集計が表示されます。")
-    else:
-        st.dataframe(services.summarize(active, end), hide_index=True, use_container_width=True)
-
-    archived = [r for r in db.list_routines(include_archived=True) if r.archived]
-    if archived:
-        with st.expander(f"アーカイブ済み（{len(archived)}件）"):
-            st.dataframe(
-                services.summarize(archived, end), hide_index=True, use_container_width=True
-            )
 
 
 with tab_manage:
