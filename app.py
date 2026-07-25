@@ -69,6 +69,8 @@ HEATMAP_CSS = """
   .st-key-today3 [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]{
     width:100%!important;flex:1 1 100%!important;min-width:100%!important;}
 }
+.st-key-today3 [data-testid="stButtonGroup"] button{
+  padding-left:7px!important;padding-right:7px!important;font-size:13px!important;white-space:nowrap;}
 </style>
 """
 
