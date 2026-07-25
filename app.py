@@ -10,7 +10,7 @@ import plotly.graph_objects as go
 import streamlit as st
 import streamlit.components.v1 as components
 
-st.set_page_config(page_title="routine-log", page_icon="🌱", layout="centered")
+st.set_page_config(page_title="routine-log", page_icon="🌱", layout="wide")
 
 # 別アプリ（学習記録）を埋め込むタブのURL。?embed=true でヘッダ等を外した埋め込み表示にする。
 STUDY_APP_URL = "https://my-study-app-yoyo.streamlit.app/?embed=true"
@@ -64,6 +64,11 @@ HEATMAP_CSS = """
 .rl-recent-h{font-size:12px;opacity:.6;margin-bottom:6px;}
 .rl-only-mobile{display:none;}
 @media (max-width:640px){.rl-only-desktop{display:none;}.rl-only-mobile{display:block;}}
+@media (max-width:640px){
+  .st-key-today3 [data-testid="stHorizontalBlock"]{flex-direction:column-reverse;}
+  .st-key-today3 [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]{
+    width:100%!important;flex:1 1 100%!important;min-width:100%!important;}
+}
 </style>
 """
 
@@ -229,8 +234,10 @@ with tab_today:
         st.markdown(render_recent(routines, day), unsafe_allow_html=True)
         st.divider()
 
-        # 選択日＋前2日を「上=選択日 → 下=過去」の順にカードで縦積み
-        disp_days = [day, day - timedelta(days=1), day - timedelta(days=2)]
+        # DOM順は 前々日 → 前日 → 選択日。
+        # PC(>640px): st.columns(3) で横一列（左=古い → 右=選択日）。
+        # スマホ(<=640px): CSS で column-reverse にして縦積み＆選択日を最上部に。
+        disp_days = [day - timedelta(days=2), day - timedelta(days=1), day]
         ent = {
             (rid, d): s
             for rid, d, s in db.get_entries_range(day - timedelta(days=2), day)
@@ -239,37 +246,39 @@ with tab_today:
 
         st.caption("編集中は保存されません。まとめて入力し、下の「保存」を押してください。")
         with st.form("today_form"):
-            for d in disp_days:
-                with st.container(border=True):
-                    head = f"{d.month}/{d.day}（{DOW[d.weekday()]}）"
-                    st.markdown(f"**{head}**" + ("　·　選択中" if d == day else ""))
+            with st.container(key="today3"):
+                cols = st.columns(3, gap="small")
+                for i, d in enumerate(disp_days):
+                    with cols[i]:
+                        with st.container(border=True):
+                            head = f"{d.month}/{d.day}（{DOW[d.weekday()]}）"
+                            st.markdown(f"**{head}**" + ("　·　選択中" if d == day else ""))
 
-                    cc1, cc2 = st.columns(2)
-                    cc1.number_input(
-                        "睡眠(h)",
-                        min_value=0.0,
-                        max_value=24.0,
-                        step=0.5,
-                        value=logs[d][0],
-                        key=f"f_sleep_{d.isoformat()}",
-                        placeholder="7.5",
-                    )
-                    cc2.segmented_control(
-                        "気分",
-                        options=services.MOOD_ORDER,
-                        format_func=lambda m: MOOD_SYMBOL[m],
-                        default=logs[d][1],
-                        key=f"f_mood_{d.isoformat()}",
-                    )
+                            st.number_input(
+                                "睡眠(h)",
+                                min_value=0.0,
+                                max_value=24.0,
+                                step=0.5,
+                                value=logs[d][0],
+                                key=f"f_sleep_{d.isoformat()}",
+                                placeholder="7.5",
+                            )
+                            st.segmented_control(
+                                "気分",
+                                options=services.MOOD_ORDER,
+                                format_func=lambda m: MOOD_SYMBOL[m],
+                                default=logs[d][1],
+                                key=f"f_mood_{d.isoformat()}",
+                            )
 
-                    for r in routines:
-                        st.segmented_control(
-                            r.name,
-                            options=services.STATUS_ORDER,
-                            format_func=lambda s: f"{STATUS_SYMBOL[s]} {SHORT_STATUS[s]}",
-                            default=ent.get((r.id, d)),
-                            key=f"f_seg_{r.id}_{d.isoformat()}",
-                        )
+                            for r in routines:
+                                st.segmented_control(
+                                    r.name,
+                                    options=services.STATUS_ORDER,
+                                    format_func=lambda s: f"{STATUS_SYMBOL[s]} {SHORT_STATUS[s]}",
+                                    default=ent.get((r.id, d)),
+                                    key=f"f_seg_{r.id}_{d.isoformat()}",
+                                )
 
             submitted = st.form_submit_button(
                 "3日分を保存", type="primary", use_container_width=True
