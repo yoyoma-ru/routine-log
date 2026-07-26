@@ -296,7 +296,9 @@ with tab_today:
                             # この日だけを登録するボタン（各カード末尾）
                             # ラベルは日付入りで一意にする（form_submit_button はラベルからキーを生成するため）
                             day_submits[d] = st.form_submit_button(
-                                f"{d.month}/{d.day} を登録", use_container_width=True
+                                f"{d.month}/{d.day} を登録",
+                                type="primary",
+                                use_container_width=True,
                             )
 
             submitted = st.form_submit_button(
