@@ -206,6 +206,14 @@ def legend_html(with_daily: bool = False) -> str:
     return f'<div class="rl-legend">{items}</div>'
 
 
+def _save_day(d, routines) -> None:
+    """指定日1日分（睡眠・気分・全ルーティン）をフォームの入力値から保存する。"""
+    db.set_sleep(d, st.session_state.get(f"f_sleep_{d.isoformat()}"))
+    db.set_mood(d, st.session_state.get(f"f_mood_{d.isoformat()}"))
+    for r in routines:
+        db.set_entry(r.id, d, st.session_state.get(f"f_seg_{r.id}_{d.isoformat()}"))
+
+
 # ---- タブ本体 --------------------------------------------------------------
 
 st.markdown(HEATMAP_CSS, unsafe_allow_html=True)
@@ -247,6 +255,7 @@ with tab_today:
         logs = {d: db.get_daily_log(d) for d in disp_days}
 
         st.caption("編集中は保存されません。まとめて入力し、下の「保存」を押してください。")
+        day_submits = {}
         with st.form("today_form"):
             with st.container(key="today3"):
                 cols = st.columns(3, gap="small")
@@ -284,18 +293,28 @@ with tab_today:
                                     key=f"f_seg_{r.id}_{d.isoformat()}",
                                 )
 
+                            # この日だけを登録するボタン（各カード末尾）
+                            # ラベルは日付入りで一意にする（form_submit_button はラベルからキーを生成するため）
+                            day_submits[d] = st.form_submit_button(
+                                f"{d.month}/{d.day} を登録", use_container_width=True
+                            )
+
             submitted = st.form_submit_button(
                 "3日分を保存", type="primary", use_container_width=True
             )
 
         if submitted:
             for d in disp_days:
-                db.set_sleep(d, st.session_state.get(f"f_sleep_{d.isoformat()}"))
-                db.set_mood(d, st.session_state.get(f"f_mood_{d.isoformat()}"))
-                for r in routines:
-                    db.set_entry(r.id, d, st.session_state.get(f"f_seg_{r.id}_{d.isoformat()}"))
+                _save_day(d, routines)
             st.success("3日分を保存しました。")
             st.rerun()
+        else:
+            for d, clicked in day_submits.items():
+                if clicked:
+                    _save_day(d, routines)
+                    st.success(f"{d.month}/{d.day} の1日分を保存しました。")
+                    st.rerun()
+                    break
 
     st.markdown(legend_html(), unsafe_allow_html=True)
 
