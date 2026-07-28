@@ -1,19 +1,15 @@
 """フロントエンド（Streamlit UI）。
 
 画面の組み立てと入力受付・表示だけを行い、集計やDB操作は services / db に委ねる。
-タブ構成: 今日 / ヒートマップ / 体重 / 学習 / 管理。
+タブ構成: 今日 / ヒートマップ / 体重 / 管理。
 """
 
 from datetime import timedelta
 
 import plotly.graph_objects as go
 import streamlit as st
-import streamlit.components.v1 as components
 
 st.set_page_config(page_title="routine-log", page_icon="🌱", layout="wide")
-
-# 別アプリ（学習記録）を埋め込むタブのURL。?embed=true でヘッダ等を外した埋め込み表示にする。
-STUDY_APP_URL = "https://my-study-app-yoyo.streamlit.app/?embed=true"
 
 # 体重の選択肢: 62.0 → 54.0 を 0.1 刻み（表示は小数第1位）
 WEIGHT_OPTIONS = [round(62.0 - 0.1 * i, 1) for i in range(81)]
@@ -219,8 +215,8 @@ def _save_day(d, routines) -> None:
 st.markdown(HEATMAP_CSS, unsafe_allow_html=True)
 st.title("🌱 routine-log")
 
-tab_today, tab_heat, tab_weight, tab_study, tab_manage = st.tabs(
-    ["今日", "ヒートマップ", "体重", "学習", "管理"]
+tab_today, tab_heat, tab_weight, tab_manage = st.tabs(
+    ["今日", "ヒートマップ", "体重", "管理"]
 )
 
 
@@ -460,12 +456,3 @@ with tab_weight:
             yaxis=dict(title="体重 (kg)", tickformat=".1f"),
         )
         st.plotly_chart(fig, use_container_width=True)
-
-
-with tab_study:
-    st.caption("学習記録アプリ（別アプリを埋め込み表示）")
-    components.iframe(STUDY_APP_URL, height=900, scrolling=True)
-    st.markdown(
-        f"[別タブで開く ↗]({STUDY_APP_URL.replace('?embed=true', '')})",
-        unsafe_allow_html=False,
-    )
