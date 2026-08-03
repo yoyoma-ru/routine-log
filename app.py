@@ -203,7 +203,11 @@ def legend_html(with_daily: bool = False) -> str:
 
 
 def _save_day(d, routines) -> None:
-    """指定日1日分（睡眠・気分・全ルーティン）をフォームの入力値から保存する。"""
+    """指定日1日分（体重・睡眠・気分・全ルーティン）をフォームの入力値から保存する。"""
+    # 体重は体重タブと同じ WeightLog を参照。未選択(None)なら既存値を消さないようスキップ。
+    w = st.session_state.get(f"f_weight_{d.isoformat()}")
+    if w is not None:
+        db.set_weight(d, w)
     db.set_sleep(d, st.session_state.get(f"f_sleep_{d.isoformat()}"))
     db.set_mood(d, st.session_state.get(f"f_mood_{d.isoformat()}"))
     for r in routines:
@@ -249,6 +253,7 @@ with tab_today:
             for rid, d, s in db.get_entries_range(day - timedelta(days=2), day)
         }
         logs = {d: db.get_daily_log(d) for d in disp_days}
+        weights = dict(db.get_weight_logs())  # 体重タブと同じ WeightLog を参照
 
         st.caption("編集中は保存されません。まとめて入力し、下の「保存」を押してください。")
         day_submits = {}
@@ -260,6 +265,17 @@ with tab_today:
                         with st.container(border=True):
                             head = f"{d.month}/{d.day}（{DOW[d.weekday()]}）"
                             st.markdown(f"**{head}**" + ("　·　選択中" if d == day else ""))
+
+                            _wt = weights.get(d)
+                            _widx = WEIGHT_OPTIONS.index(_wt) if _wt in WEIGHT_OPTIONS else None
+                            st.selectbox(
+                                "体重(kg)" if _wt is not None else "体重(kg)（未入力）",
+                                WEIGHT_OPTIONS,
+                                index=_widx,
+                                format_func=lambda x: f"{x:.1f}",
+                                key=f"f_weight_{d.isoformat()}",
+                                placeholder="選択",
+                            )
 
                             _sleep = logs[d][0]
                             st.number_input(
