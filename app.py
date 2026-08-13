@@ -288,11 +288,12 @@ with tab_today:
                                 format="%.1f",
                                 placeholder="入力してください",
                             )
+                            _mood = logs[d][1]
                             st.segmented_control(
-                                "気分",
+                                "気分" if _mood is not None else "気分（未入力）",
                                 options=services.MOOD_ORDER,
-                                format_func=lambda m: MOOD_SYMBOL[m],
-                                default=logs[d][1],
+                                format_func=lambda m: f"{MOOD_SYMBOL[m]} {services.MOOD_LABELS[m]}",
+                                default=_mood,
                                 key=f"f_mood_{d.isoformat()}",
                             )
 
