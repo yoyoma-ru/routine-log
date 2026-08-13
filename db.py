@@ -111,7 +111,9 @@ class DailyLog(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     date: Mapped[date] = mapped_column(Date, nullable=False, unique=True, index=True)
     sleep_hours: Mapped[float | None] = mapped_column(Float, nullable=True)
-    mood: Mapped[str | None] = mapped_column(String(10), nullable=True)  # 'good'|'bad'
+    mood: Mapped[str | None] = mapped_column(String(10), nullable=True)  # 旧・単一気分（互換用）
+    mood_morning: Mapped[str | None] = mapped_column(String(10), nullable=True)  # 'good'|'bad'
+    mood_night: Mapped[str | None] = mapped_column(String(10), nullable=True)  # 'good'|'bad'
 
 
 class WeightLog(Base):
@@ -250,17 +252,17 @@ def get_all_entries() -> list[tuple[int, date, str]]:
 VALID_MOODS = ("good", "bad")
 
 
-def get_daily_log(day: date) -> tuple[float | None, str | None]:
-    """指定日の (sleep_hours, mood) を返す。未記入は (None, None)。"""
+def get_daily_log(day: date) -> tuple[float | None, str | None, str | None]:
+    """指定日の (sleep_hours, mood_morning, mood_night) を返す。未記入は (None, None, None)。"""
     with Session() as s:
         r = s.scalar(select(DailyLog).where(DailyLog.date == day))
         if r is None:
-            return (None, None)
-        return (r.sleep_hours, r.mood)
+            return (None, None, None)
+        return (r.sleep_hours, r.mood_morning, r.mood_night)
 
 
 def _set_daily_field(day: date, field: str, value) -> None:
-    """DailyLog の1フィールドを upsert する。両フィールドとも空なら行を削除。"""
+    """DailyLog の1フィールドを upsert する。全フィールドが空になれば行を削除。"""
     with Session() as s:
         r = s.scalar(select(DailyLog).where(DailyLog.date == day))
         if r is None:
@@ -272,7 +274,12 @@ def _set_daily_field(day: date, field: str, value) -> None:
             s.commit()
             return
         setattr(r, field, value)
-        if r.sleep_hours is None and r.mood is None:
+        if (
+            r.sleep_hours is None
+            and r.mood is None
+            and r.mood_morning is None
+            and r.mood_night is None
+        ):
             s.delete(r)
         s.commit()
 
@@ -282,22 +289,38 @@ def set_sleep(day: date, hours: float | None) -> None:
     _set_daily_field(day, "sleep_hours", hours)
 
 
-def set_mood(day: date, mood: str | None) -> None:
-    """気分（'good'|'bad'）を保存。None で記録取消。"""
+def _set_mood_field(day: date, field: str, mood: str | None) -> None:
     if mood is not None and mood not in VALID_MOODS:
         raise ValueError(f"不正な mood: {mood!r}")
-    _set_daily_field(day, "mood", mood)
+    _set_daily_field(day, field, mood)
 
 
-def get_daily_logs_range(start: date, end: date) -> list[tuple[date, float | None, str | None]]:
-    """[start, end] の DailyLog を (date, sleep_hours, mood) で返す（集計用）。"""
+def set_mood_morning(day: date, mood: str | None) -> None:
+    """朝の気分（'good'|'bad'）を保存。None で記録取消。"""
+    _set_mood_field(day, "mood_morning", mood)
+
+
+def set_mood_night(day: date, mood: str | None) -> None:
+    """夜の気分（'good'|'bad'）を保存。None で記録取消。"""
+    _set_mood_field(day, "mood_night", mood)
+
+
+def get_daily_logs_range(
+    start: date, end: date
+) -> list[tuple[date, float | None, str | None, str | None]]:
+    """[start, end] の DailyLog を (date, sleep_hours, mood_morning, mood_night) で返す。"""
     with Session() as s:
         rows = s.execute(
-            select(DailyLog.date, DailyLog.sleep_hours, DailyLog.mood)
+            select(
+                DailyLog.date,
+                DailyLog.sleep_hours,
+                DailyLog.mood_morning,
+                DailyLog.mood_night,
+            )
             .where(DailyLog.date >= start, DailyLog.date <= end)
             .order_by(DailyLog.date)
         ).all()
-        return [(d, sh, m) for d, sh, m in rows]
+        return [(d, sh, mm, mn) for d, sh, mm, mn in rows]
 
 
 # --- WeightLog（体重）------------------------------------------------------

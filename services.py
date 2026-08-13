@@ -137,27 +137,6 @@ def summarize(routines: list, end: date) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def daily_condition_summary(end: date, days: int = 30) -> dict:
-    """直近 days 日の睡眠・気分のサマリを返す。
-
-    戻り値: {avg_sleep, sleep_days, good_ratio, mood_days}
-      avg_sleep   … 平均睡眠時間（記録のある日のみ。無ければ None）
-      good_ratio  … 気分が「良い」の割合（記録のある日のみ。無ければ None）
-    """
-    start = end - timedelta(days=days - 1)
-    logs = db.get_daily_logs_range(start, end)
-    sleeps = [sh for _d, sh, _m in logs if sh is not None]
-    moods = [m for _d, _sh, m in logs if m is not None]
-    avg_sleep = round(sum(sleeps) / len(sleeps), 1) if sleeps else None
-    good_ratio = round(sum(1 for m in moods if m == "good") / len(moods) * 100) if moods else None
-    return {
-        "avg_sleep": avg_sleep,
-        "sleep_days": len(sleeps),
-        "good_ratio": good_ratio,
-        "mood_days": len(moods),
-    }
-
-
 def _trend_symbol(recent: float | None, prev: float | None) -> str:
     """直近と前期間の行動率を比べて傾向記号を返す。"""
     if recent is None or prev is None:

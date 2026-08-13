@@ -47,7 +47,9 @@ HEATMAP_CSS = """
 .rl-done{background:currentColor;}
 .rl-small{background:linear-gradient(135deg,currentColor 0 50%,transparent 50% 100%);}
 .rl-none{display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:700;line-height:1;}
-.rl-mood{display:flex;align-items:center;justify-content:center;font-size:18px;line-height:1;}
+.rl-mgood,.rl-mbad{display:flex;align-items:center;justify-content:center;font-size:15px;line-height:1;}
+.rl-mgood{background:#EAF3DE;}
+.rl-mbad{background:#FCEBEB;}
 .rl-num{font-size:12px;font-variant-numeric:tabular-nums;}
 .rl-stripgrid{display:grid;align-items:center;overflow-x:auto;}
 .rl-saxis{font-size:10px;opacity:.7;text-align:center;padding-bottom:3px;white-space:nowrap;}
@@ -87,14 +89,15 @@ def _mark_html(status: str | None) -> str:
 # セル/凡例で使う記号（今日タブの入力ボタンとヒートマップで共通）
 STATUS_SYMBOL = {"done": "■", "small": "◤", "none": "✕"}
 SHORT_STATUS = {"done": "完了", "small": "最低限", "none": "してない"}
-MOOD_SYMBOL = {"good": "☺", "bad": "☹"}
+# 気分は色付きの顔で表現（良い=緑背景の笑顔 / 悪い=赤背景の困り顔）
+MOOD_EMOJI = {"good": "😊", "bad": "😞"}
 
 
 def _mood_html(mood: str | None) -> str:
     if mood == "good":
-        return '<div class="rl-mark rl-mood">☺</div>'
+        return '<div class="rl-mark rl-mgood">😊</div>'
     if mood == "bad":
-        return '<div class="rl-mark rl-mood">☹</div>'
+        return '<div class="rl-mark rl-mbad">😞</div>'
     return ""  # 未記入
 
 
@@ -105,7 +108,7 @@ MOODW = 30   # 気分の列幅
 def render_heatmap(routines: list, days: int, end, show_daily: bool = False) -> str:
     """方眼紙スタイルのヒートマップ HTML を返す（行=日付・列=ルーティン・縦書き見出し）。
 
-    show_daily=True のとき、右端に「睡眠時間（数値）」「気分（☺/☹）」の列を足す。
+    show_daily=True のとき、右端に「睡眠時間（数値）」「朝の気分」「夜の気分」の列を足す。
     睡眠・気分は日付ごとの記録（ルーティン非依存）なので現役ヒートマップにのみ表示する。
     """
     if not routines:
@@ -113,11 +116,14 @@ def render_heatmap(routines: list, days: int, end, show_daily: bool = False) -> 
     dates, matrix = services.heatmap_matrix(routines, days, end)
     daily = {}
     if show_daily:
-        daily = {d: (sh, m) for d, sh, m in db.get_daily_logs_range(dates[-1], dates[0])}
+        daily = {
+            d: (sh, mm, mn)
+            for d, sh, mm, mn in db.get_daily_logs_range(dates[-1], dates[0])
+        }
 
     cols = f"{DATEW}px " + " ".join([f"{CELL}px"] * len(routines))
     if show_daily:
-        cols += f" {SLEEPW}px {MOODW}px"
+        cols += f" {SLEEPW}px {MOODW}px {MOODW}px"
 
     # 見出しは高さ固定せず、名前の全長に合わせて伸ばす（切れ防止）。
     cells = ['<div class="rl-corner">日付＼行動</div>']
@@ -125,7 +131,8 @@ def render_heatmap(routines: list, days: int, end, show_daily: bool = False) -> 
         cells.append(f'<div class="rl-head" title="{r.name}">{r.name}</div>')
     if show_daily:
         cells.append('<div class="rl-head">睡眠</div>')
-        cells.append('<div class="rl-head">気分</div>')
+        cells.append('<div class="rl-head">朝の気分</div>')
+        cells.append('<div class="rl-head">夜の気分</div>')
 
     dow = ["月", "火", "水", "木", "金", "土", "日"]
     today = db.today()
@@ -137,10 +144,11 @@ def render_heatmap(routines: list, days: int, end, show_daily: bool = False) -> 
             status = matrix[r.id].get(d)
             cells.append(f'<div class="rl-cell" style="height:{CELL}px">{_mark_html(status)}</div>')
         if show_daily:
-            sh, m = daily.get(d, (None, None))
+            sh, mm, mn = daily.get(d, (None, None, None))
             sleep_txt = f"{sh:g}" if sh is not None else ""
             cells.append(f'<div class="rl-cell rl-num" style="height:{CELL}px">{sleep_txt}</div>')
-            cells.append(f'<div class="rl-cell" style="height:{CELL}px">{_mood_html(m)}</div>')
+            cells.append(f'<div class="rl-cell" style="height:{CELL}px">{_mood_html(mm)}</div>')
+            cells.append(f'<div class="rl-cell" style="height:{CELL}px">{_mood_html(mn)}</div>')
     grid = f'<div class="rl-grid" style="grid-template-columns:{cols}">' + "".join(cells) + "</div>"
     return f'<div class="rl-wrap">{grid}</div>'
 
@@ -157,12 +165,25 @@ def render_strip(routines: list, days: int, end) -> str:
     name_w, sc = 120, 28
     cols = f"{name_w}px " + " ".join([f"{sc}px"] * len(dates))
 
+    # 気分（朝・夜）を日付ごとに取得。ルーティンの上に行として表示する。
+    mood = {
+        d: (mm, mn) for d, _sh, mm, mn in db.get_daily_logs_range(dates[0], dates[-1])
+    }
+
     cells = ['<div></div>']  # 日付軸の左端（名前列の上）
     prev_month = None
     for d in dates:
         label = f"{d.month}/{d.day}" if d.month != prev_month else f"{d.day}"
         prev_month = d.month
         cells.append(f'<div class="rl-saxis">{label}</div>')
+
+    # 朝の気分 / 夜の気分（筋トレの上）
+    for idx, mlabel in enumerate(("朝の気分", "夜の気分")):
+        cells.append(f'<div class="rl-strip-name">{mlabel}</div>')
+        for d in dates:
+            m = mood.get(d, (None, None))[idx]
+            cells.append(f'<div class="rl-scell">{_mood_html(m)}</div>')
+
     for r in routines:
         cells.append(f'<div class="rl-strip-name" title="{r.name}">{r.name}</div>')
         for d in dates:
@@ -195,8 +216,8 @@ def legend_html(with_daily: bool = False) -> str:
     )
     if with_daily:
         items += (
-            '<span><span class="box rl-mood">☺</span>気分：良い</span>'
-            '<span><span class="box rl-mood">☹</span>気分：悪い</span>'
+            '<span><span class="box rl-mgood">😊</span>気分：良い</span>'
+            '<span><span class="box rl-mbad">😞</span>気分：悪い</span>'
             "<span>睡眠：時間（数値）</span>"
         )
     return f'<div class="rl-legend">{items}</div>'
@@ -209,7 +230,8 @@ def _save_day(d, routines) -> None:
     if w is not None:
         db.set_weight(d, w)
     db.set_sleep(d, st.session_state.get(f"f_sleep_{d.isoformat()}"))
-    db.set_mood(d, st.session_state.get(f"f_mood_{d.isoformat()}"))
+    db.set_mood_morning(d, st.session_state.get(f"f_moodm_{d.isoformat()}"))
+    db.set_mood_night(d, st.session_state.get(f"f_moodn_{d.isoformat()}"))
     for r in routines:
         db.set_entry(r.id, d, st.session_state.get(f"f_seg_{r.id}_{d.isoformat()}"))
 
@@ -288,13 +310,20 @@ with tab_today:
                                 format="%.1f",
                                 placeholder="入力してください",
                             )
-                            _mood = logs[d][1]
+                            _mm, _mn = logs[d][1], logs[d][2]
                             st.segmented_control(
-                                "気分" if _mood is not None else "気分（未入力）",
+                                "朝の気分" if _mm is not None else "朝の気分（未入力）",
                                 options=services.MOOD_ORDER,
-                                format_func=lambda m: f"{MOOD_SYMBOL[m]} {services.MOOD_LABELS[m]}",
-                                default=_mood,
-                                key=f"f_mood_{d.isoformat()}",
+                                format_func=lambda m: f"{MOOD_EMOJI[m]} {services.MOOD_LABELS[m]}",
+                                default=_mm,
+                                key=f"f_moodm_{d.isoformat()}",
+                            )
+                            st.segmented_control(
+                                "夜の気分" if _mn is not None else "夜の気分（未入力）",
+                                options=services.MOOD_ORDER,
+                                format_func=lambda m: f"{MOOD_EMOJI[m]} {services.MOOD_LABELS[m]}",
+                                default=_mn,
+                                key=f"f_moodn_{d.isoformat()}",
                             )
 
                             for r in routines:
