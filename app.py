@@ -4,6 +4,7 @@
 タブ構成: 今日 / ヒートマップ / 体重 / 管理。
 """
 
+from collections import namedtuple
 from datetime import timedelta
 
 import plotly.graph_objects as go
@@ -22,6 +23,53 @@ except RuntimeError as e:
     st.error(str(e))
     st.info("`.env` に Neon の DATABASE_URL を設定し、`python init_db.py` を実行してください。")
     st.stop()
+
+
+# ---- 読み取りキャッシュ ----------------------------------------------------
+# Neon への往復を減らすため、読み取りは st.cache_data でキャッシュする。
+# 返り値は「素のデータ（tuple/namedtuple）」のみ（ORMオブジェクトはキャッシュしない）。
+# 書き込み後は各所で st.cache_data.clear() を呼び、最新を反映する。
+RoutineView = namedtuple("RoutineView", "id name sort_order archived")
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _routines(include_archived: bool):
+    return [
+        RoutineView(r.id, r.name, r.sort_order, r.archived)
+        for r in db.list_routines(include_archived=include_archived)
+    ]
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _entries_range(start, end):
+    return db.get_entries_range(start, end)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _daily_logs_range(start, end):
+    return db.get_daily_logs_range(start, end)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _weight_logs():
+    return db.get_weight_logs()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _weight_goal():
+    return db.get_weight_goal()
+
+
+def _matrix(routines: list, days: int, end):
+    """ヒートマップ用 (dates[新しい順], {routine_id: {date: status}}) をキャッシュ経由で作る。"""
+    start = end - timedelta(days=days - 1)
+    ids = {r.id for r in routines}
+    matrix = {r.id: {} for r in routines}
+    for rid, d, status in _entries_range(start, end):
+        if rid in ids:
+            matrix[rid][d] = status
+    dates = [end - timedelta(days=i) for i in range(days)]
+    return dates, matrix
 
 
 # 方眼紙ヒートマップ用のスタイル（記号: 完了=黒塗り / 最低限=斜線半分 / してない=✕ / 未記入=空白）。
@@ -113,12 +161,12 @@ def render_heatmap(routines: list, days: int, end, show_daily: bool = False) -> 
     """
     if not routines:
         return "<p style='opacity:.7'>表示できるルーティンがありません。</p>"
-    dates, matrix = services.heatmap_matrix(routines, days, end)
+    dates, matrix = _matrix(routines, days, end)
     daily = {}
     if show_daily:
         daily = {
             d: (sh, mm, mn)
-            for d, sh, mm, mn in db.get_daily_logs_range(dates[-1], dates[0])
+            for d, sh, mm, mn in _daily_logs_range(dates[-1], dates[0])
         }
 
     cols = f"{DATEW}px " + " ".join([f"{CELL}px"] * len(routines))
@@ -160,14 +208,14 @@ def render_strip(routines: list, days: int, end) -> str:
     """
     if not routines:
         return ""
-    dates, matrix = services.heatmap_matrix(routines, days, end)
+    dates, matrix = _matrix(routines, days, end)
     dates = list(reversed(dates))  # 左=古い → 右=今日
     name_w, sc = 120, 28
     cols = f"{name_w}px " + " ".join([f"{sc}px"] * len(dates))
 
     # 気分（朝・夜）を日付ごとに取得。ルーティンの上に行として表示する。
     mood = {
-        d: (mm, mn) for d, _sh, mm, mn in db.get_daily_logs_range(dates[0], dates[-1])
+        d: (mm, mn) for d, _sh, mm, mn in _daily_logs_range(dates[0], dates[-1])
     }
 
     cells = ['<div></div>']  # 日付軸の左端（名前列の上）
@@ -253,7 +301,7 @@ with tab_today:
     day = st.date_input(
         "基準日", value=db.today(), format="YYYY/MM/DD", help="この日＋前2日の3日分を表示します"
     )
-    routines = db.list_routines()
+    routines = _routines(False)
 
     if not routines:
         st.info("まだルーティンがありません。例から追加して始めましょう。")
@@ -261,6 +309,7 @@ with tab_today:
         if st.button("例のルーティンを追加", type="primary"):
             for i, name in enumerate(services.EXAMPLE_ROUTINES):
                 db.add_routine(name, sort_order=i + 1)
+            st.cache_data.clear()
             st.rerun()
     else:
         st.markdown(render_recent(routines, day), unsafe_allow_html=True)
@@ -270,12 +319,11 @@ with tab_today:
         # PC(>640px): st.columns(3) で横一列（左=古い → 右=選択日）。
         # スマホ(<=640px): CSS で column-reverse にして縦積み＆選択日を最上部に。
         disp_days = [day - timedelta(days=2), day - timedelta(days=1), day]
-        ent = {
-            (rid, d): s
-            for rid, d, s in db.get_entries_range(day - timedelta(days=2), day)
-        }
-        logs = {d: db.get_daily_log(d) for d in disp_days}
-        weights = dict(db.get_weight_logs())  # 体重タブと同じ WeightLog を参照
+        ent = {(rid, d): s for rid, d, s in _entries_range(day - timedelta(days=2), day)}
+        # 睡眠・気分は1回のレンジ取得でまとめる（get_daily_log を3回叩かない）
+        _dl = {d: (sh, mm, mn) for d, sh, mm, mn in _daily_logs_range(day - timedelta(days=2), day)}
+        logs = {d: _dl.get(d, (None, None, None)) for d in disp_days}
+        weights = dict(_weight_logs())  # 体重タブと同じ WeightLog を参照
 
         st.caption("編集中は保存されません。まとめて入力し、下の「保存」を押してください。")
         day_submits = {}
@@ -350,12 +398,14 @@ with tab_today:
         if submitted:
             for d in disp_days:
                 _save_day(d, routines)
+            st.cache_data.clear()
             st.success("3日分を保存しました。")
             st.rerun()
         else:
             for d, clicked in day_submits.items():
                 if clicked:
                     _save_day(d, routines)
+                    st.cache_data.clear()
                     st.success(f"{d.month}/{d.day} の1日分を保存しました。")
                     st.rerun()
                     break
@@ -366,11 +416,11 @@ with tab_today:
 with tab_heat:
     days = st.radio("表示期間", [30, 60, 90], horizontal=True, format_func=lambda d: f"{d}日")
     end = db.today()
-    active = db.list_routines()
+    active = _routines(False)
     st.markdown(render_heatmap(active, days, end, show_daily=True), unsafe_allow_html=True)
     st.caption("⬍ 縦スクロールで過去の日付まで辿れます")
 
-    archived = [r for r in db.list_routines(include_archived=True) if r.archived]
+    archived = [r for r in _routines(True) if r.archived]
     if archived:
         with st.expander(f"アーカイブ済み（{len(archived)}件）"):
             st.markdown(render_heatmap(archived, days, end), unsafe_allow_html=True)
@@ -380,7 +430,7 @@ with tab_heat:
 
 with tab_manage:
     st.caption("表を直接編集できます。編集中は保存されません。行の追加・名前変更・並び順・アーカイブをまとめて行い、最後に「保存」を押してください。")
-    all_routines = db.list_routines(include_archived=True)
+    all_routines = _routines(True)
     import pandas as pd
 
     df = pd.DataFrame(
@@ -418,6 +468,7 @@ with tab_manage:
             for row in edited.to_dict("records")
         ]
         services.apply_routine_edits(rows, all_routines)
+        st.cache_data.clear()
         st.success("保存しました。")
         st.rerun()
 
@@ -427,7 +478,7 @@ with tab_weight:
     with st.form("weight_form"):
         wc1, wc2, wc3 = st.columns([2, 2, 1])
         w_day = wc1.date_input("日付", value=db.today(), format="YYYY/MM/DD")
-        existing = dict(db.get_weight_logs()).get(w_day)
+        existing = dict(_weight_logs()).get(w_day)
         idx = WEIGHT_OPTIONS.index(existing) if existing in WEIGHT_OPTIONS else None
         w_val = wc2.selectbox(
             "体重 (kg)",
@@ -443,11 +494,12 @@ with tab_weight:
             st.warning("体重を選択してください。")
         else:
             db.set_weight(w_day, w_val)
+            st.cache_data.clear()
             st.success(f"{w_day.isoformat()} の体重を {w_val:.1f} kg で記録しました。")
             st.rerun()
 
     # 目標設定
-    target_w, target_d = db.get_weight_goal()
+    target_w, target_d = _weight_goal()
     with st.expander("目標を設定"):
         with st.form("weight_goal_form"):
             gc1, gc2 = st.columns(2)
@@ -461,11 +513,12 @@ with tab_weight:
             )
             if st.form_submit_button("目標を保存", type="primary"):
                 db.set_weight_goal(g_w, g_d)
+                st.cache_data.clear()
                 st.success("目標を保存しました。")
                 st.rerun()
 
     # グラフ
-    logs = db.get_weight_logs()
+    logs = _weight_logs()
     if not logs:
         st.info("体重を記録するとグラフが表示されます。")
     else:
