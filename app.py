@@ -274,18 +274,23 @@ def legend_html(with_daily: bool = False) -> str:
 
 
 def _save_day(d, routines) -> None:
-    """指定日1日分（体重・睡眠・気分・全ルーティン）をフォームの入力値から保存する。"""
-    # 体重・睡眠は未選択(None)なら既存値を消さないようスキップ（プルダウンの選択肢外の既存値保護）。
-    w = st.session_state.get(f"f_weight_{d.isoformat()}")
+    """指定日1日分（体重・睡眠・気分・全ルーティン）をまとめて保存（API呼び出し最小化）。"""
+    iso = d.isoformat()
+    # 体重は未選択(None)なら既存値を消さないようスキップ（選択肢外の既存値保護）。
+    w = st.session_state.get(f"f_weight_{iso}")
     if w is not None:
         db.set_weight(d, w)
-    s = st.session_state.get(f"f_sleep_{d.isoformat()}")
-    if s is not None:
-        db.set_sleep(d, s)
-    db.set_mood_morning(d, st.session_state.get(f"f_moodm_{d.isoformat()}"))
-    db.set_mood_night(d, st.session_state.get(f"f_moodn_{d.isoformat()}"))
-    for r in routines:
-        db.set_entry(r.id, d, st.session_state.get(f"f_seg_{r.id}_{d.isoformat()}"))
+    # 睡眠・気分は1回の読み＋1回の書きでまとめて保存。睡眠の未選択は変更しない。
+    s = st.session_state.get(f"f_sleep_{iso}")
+    db.set_daily_bulk(
+        d,
+        sleep=(s if s is not None else db.KEEP),
+        mood_morning=st.session_state.get(f"f_moodm_{iso}"),
+        mood_night=st.session_state.get(f"f_moodn_{iso}"),
+    )
+    # ルーティンは1回の読み＋バッチ書きでまとめて保存。
+    mapping = {r.id: st.session_state.get(f"f_seg_{r.id}_{iso}") for r in routines}
+    db.set_entries_bulk(d, mapping)
 
 
 # ---- タブ本体 --------------------------------------------------------------

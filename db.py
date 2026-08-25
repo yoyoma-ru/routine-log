@@ -15,9 +15,11 @@ routine-log のデータを1つの Google スプレッドシート（タブ=テ�
 
 import json
 import os
+import time
 from datetime import date, datetime, timedelta, timezone
 
 import gspread
+from gspread.exceptions import APIError
 from google.oauth2.service_account import Credentials
 
 JST = timezone(timedelta(hours=9))
@@ -124,8 +126,21 @@ def _ws(name):
     return _spreadsheet().worksheet(name)
 
 
+def _retry(fn, tries: int = 4, base: float = 1.2):
+    """Sheets API のレート制限(429)や一時エラー(5xx)を指数バックオフでリトライ。"""
+    for i in range(tries):
+        try:
+            return fn()
+        except APIError as e:
+            code = getattr(getattr(e, "response", None), "status_code", None)
+            if code in (429, 500, 503) and i < tries - 1:
+                time.sleep(base * (i + 1))
+                continue
+            raise
+
+
 def _records(name):
-    return _ws(name).get_all_records()
+    return _retry(lambda: _ws(name).get_all_records())
 
 
 def ping() -> None:
@@ -148,16 +163,45 @@ def init_db() -> None:
 
 
 def _append(name, row_values):
-    _ws(name).append_row(row_values, value_input_option="RAW")
+    _retry(lambda: _ws(name).append_row(row_values, value_input_option="RAW"))
+
+
+def _append_rows(name, rows):
+    if rows:
+        _retry(lambda: _ws(name).append_rows(rows, value_input_option="RAW"))
 
 
 def _update_row(name, rownum, ncols, row_values):
     last_col = chr(ord("A") + ncols - 1)
-    _ws(name).update(
-        range_name=f"A{rownum}:{last_col}{rownum}",
-        values=[row_values],
-        value_input_option="RAW",
+    _retry(
+        lambda: _ws(name).update(
+            range_name=f"A{rownum}:{last_col}{rownum}",
+            values=[row_values],
+            value_input_option="RAW",
+        )
     )
+
+
+def _batch_update(name, updates):
+    """updates = [(rownum, ncols, [values...]), ...] を1回のAPIでまとめて更新。"""
+    if not updates:
+        return
+    data = []
+    for rownum, ncols, vals in updates:
+        last_col = chr(ord("A") + ncols - 1)
+        data.append({"range": f"A{rownum}:{last_col}{rownum}", "values": [vals]})
+    _retry(lambda: _ws(name).batch_update(data, value_input_option="RAW"))
+
+
+def _delete_rows(name, rownums):
+    """指定行を削除（インデックスずれ防止のため降順で）。"""
+    ws = _ws(name)
+    for rn in sorted(set(rownums), reverse=True):
+        _retry(lambda rn=rn: ws.delete_rows(rn))
+
+
+# 「変更しない」ことを表すセンチネル（bulk 更新で使用）
+KEEP = object()
 
 
 # --- Routine ---------------------------------------------------------------
@@ -260,6 +304,46 @@ def set_entry(routine_id, day: date, status) -> None:
         _append("entries", [new_id, int(routine_id), diso, status, ""])
 
 
+def set_entries_bulk(day: date, mapping: dict) -> None:
+    """1日分の複数ルーティンの status をまとめて保存（読み1回＋書きを最小化）。
+
+    mapping = {routine_id: status|None}。None は削除、VALID_STATUSES は upsert。
+    API呼び出し = 読み1 ＋ 更新(batch)1 ＋ 追加(append_rows)1 ＋ 削除(件数)。
+    """
+    if not mapping:
+        return
+    recs = _records("entries")
+    diso = _iso(day)
+    by_rid = {}
+    for i, r in enumerate(recs):
+        if str(r.get("routine_id")).strip() == "":
+            continue
+        if str(r.get("date"))[:10] == diso:
+            by_rid[int(r["routine_id"])] = (i + 2, r)
+    ids = [int(r["id"]) for r in recs if str(r.get("id")).strip().lstrip("-").isdigit()]
+    next_id = (max(ids) + 1) if ids else 1
+
+    updates, appends, deletes = [], [], []
+    for rid, status in mapping.items():
+        rid = int(rid)
+        if status is None:
+            if rid in by_rid:
+                deletes.append(by_rid[rid][0])
+            continue
+        if status not in VALID_STATUSES:
+            raise ValueError(f"不正な status: {status!r}")
+        if rid in by_rid:
+            rownum, rec = by_rid[rid]
+            updates.append((rownum, 5, [rec["id"], rid, diso, status, _pstr(rec.get("note")) or ""]))
+        else:
+            appends.append([next_id, rid, diso, status, ""])
+            next_id += 1
+
+    _batch_update("entries", updates)
+    _append_rows("entries", appends)
+    _delete_rows("entries", deletes)
+
+
 def get_entries_for_day(day: date) -> dict:
     diso = _iso(day)
     return {
@@ -350,6 +434,45 @@ def set_mood_morning(day: date, mood) -> None:
 
 def set_mood_night(day: date, mood) -> None:
     _set_mood_field(day, "mood_night", mood)
+
+
+def set_daily_bulk(day: date, *, sleep=KEEP, mood_morning=KEEP, mood_night=KEEP) -> None:
+    """睡眠・朝夜気分を1回の読み＋1回の書きでまとめて保存。
+
+    各引数は KEEP=変更しない / None=クリア / 値=設定。全フィールドが空になれば行削除。
+    """
+    if sleep is KEEP and mood_morning is KEEP and mood_night is KEEP:
+        return
+    recs = _records("daily_logs")
+    diso = _iso(day)
+    rownum = rec = None
+    for i, r in enumerate(recs):
+        if str(r.get("date"))[:10] == diso:
+            rownum, rec = i + 2, r
+            break
+    cur = {
+        "sleep_hours": "" if rec is None else (_pfloat(rec.get("sleep_hours")) if _pfloat(rec.get("sleep_hours")) is not None else ""),
+        "mood": "" if rec is None else (_pstr(rec.get("mood")) or ""),
+        "mood_morning": "" if rec is None else (_pstr(rec.get("mood_morning")) or ""),
+        "mood_night": "" if rec is None else (_pstr(rec.get("mood_night")) or ""),
+    }
+    if sleep is not KEEP:
+        cur["sleep_hours"] = "" if sleep is None else float(sleep)
+    for fld, val in (("mood_morning", mood_morning), ("mood_night", mood_night)):
+        if val is not KEEP:
+            if val is not None and val not in VALID_MOODS:
+                raise ValueError(f"不正な mood: {val!r}")
+            cur[fld] = "" if val is None else val
+    all_empty = all(cur[k] == "" for k in ("sleep_hours", "mood", "mood_morning", "mood_night"))
+    row = [diso, cur["sleep_hours"], cur["mood"], cur["mood_morning"], cur["mood_night"]]
+    if rec is None:
+        if not all_empty:
+            _append("daily_logs", row)
+        return
+    if all_empty:
+        _delete_rows("daily_logs", [rownum])
+        return
+    _update_row("daily_logs", rownum, 5, row)
 
 
 def get_daily_logs_range(start: date, end: date) -> list:
