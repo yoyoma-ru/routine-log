@@ -14,6 +14,8 @@ st.set_page_config(page_title="routine-log", page_icon="🌱", layout="wide")
 
 # 体重の選択肢: 62.0 → 54.0 を 0.1 刻み（表示は小数第1位）
 WEIGHT_OPTIONS = [round(62.0 - 0.1 * i, 1) for i in range(81)]
+# 睡眠の選択肢: 12.0 → 0.0 を 0.5 刻み（プルダウン）
+SLEEP_OPTIONS = [round(12.0 - 0.5 * i, 1) for i in range(25)]
 
 # DATABASE_URL 未設定や接続不可は、画面上で分かりやすく案内する。
 try:
@@ -273,11 +275,13 @@ def legend_html(with_daily: bool = False) -> str:
 
 def _save_day(d, routines) -> None:
     """指定日1日分（体重・睡眠・気分・全ルーティン）をフォームの入力値から保存する。"""
-    # 体重は体重タブと同じ WeightLog を参照。未選択(None)なら既存値を消さないようスキップ。
+    # 体重・睡眠は未選択(None)なら既存値を消さないようスキップ（プルダウンの選択肢外の既存値保護）。
     w = st.session_state.get(f"f_weight_{d.isoformat()}")
     if w is not None:
         db.set_weight(d, w)
-    db.set_sleep(d, st.session_state.get(f"f_sleep_{d.isoformat()}"))
+    s = st.session_state.get(f"f_sleep_{d.isoformat()}")
+    if s is not None:
+        db.set_sleep(d, s)
     db.set_mood_morning(d, st.session_state.get(f"f_moodm_{d.isoformat()}"))
     db.set_mood_night(d, st.session_state.get(f"f_moodn_{d.isoformat()}"))
     for r in routines:
@@ -367,15 +371,14 @@ with tab_today:
                             )
 
                             _sleep = logs[d][0]
-                            st.number_input(
+                            _sidx = SLEEP_OPTIONS.index(_sleep) if _sleep in SLEEP_OPTIONS else None
+                            st.selectbox(
                                 "睡眠(h)" if _sleep is not None else "睡眠(h)（未入力）",
-                                min_value=0.0,
-                                max_value=24.0,
-                                step=0.5,
-                                value=_sleep,
+                                SLEEP_OPTIONS,
+                                index=_sidx,
+                                format_func=lambda x: f"{x:.1f}",
                                 key=f"f_sleep_{d.isoformat()}",
-                                format="%.1f",
-                                placeholder="入力してください",
+                                placeholder="選択",
                             )
                             _mm, _mn = logs[d][1], logs[d][2]
                             st.segmented_control(
