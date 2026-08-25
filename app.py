@@ -289,19 +289,23 @@ def _save_day(d, routines) -> None:
 st.markdown(HEATMAP_CSS, unsafe_allow_html=True)
 st.title("🌱 routine-log")
 
-# DB疎通チェック（接続不可なら生のトレースバックではなく分かりやすい案内を出す）
+# 保存先（Google スプレッドシート）の疎通チェック＋初回のタブ自動作成。
+@st.cache_resource(show_spinner=False)
+def _bootstrap_schema():
+    db.init_db()  # 冪等（不足タブのみ作成）
+    return True
+
+
 try:
     db.ping()
-except Exception as e:  # noqa: BLE001 - 接続系はまとめて拾って案内する
-    _msg = str(e)
-    if "quota" in _msg or "compute time" in _msg:
-        st.error(
-            "データベース（Neon 無料枠）のコンピュート時間を使い切ったため、接続できません。"
-            "月次の枠リセットを待つか、プラン変更／別DBへの移行が必要です。"
-        )
-    else:
-        st.error("データベースに接続できませんでした。少し時間をおいて再度お試しください。")
-    st.caption(f"詳細: {_msg[:200]}")
+    _bootstrap_schema()
+except Exception as e:  # noqa: BLE001 - 接続/権限系はまとめて拾って案内する
+    st.error("データ保存先（Google スプレッドシート）に接続できませんでした。")
+    st.info(
+        "Streamlit の Secrets に `[gcp_service_account]` と `spreadsheet_id`（または `spreadsheet_name`）を設定し、"
+        "対象スプレッドシートをサービスアカウントに『編集者』で共有してください。"
+    )
+    st.caption(f"詳細: {str(e)[:300]}")
     st.stop()
 
 tab_today, tab_heat, tab_weight, tab_manage = st.tabs(

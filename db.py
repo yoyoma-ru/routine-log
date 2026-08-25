@@ -1,387 +1,424 @@
-"""データ層。
+"""データ層（Google Sheets 版）。
 
-アプリ全体で、DBへの読み書きはこのファイルの関数だけを通す。
-SQL/ORM を書くのはここに限定し、画面側(app.py)・処理層(services.py)は
-意味のある関数を呼ぶだけにする。
+routine-log のデータを1つの Google スプレッドシート（タブ=テーブル）に保存する。
+以前は Neon(Postgres) だったが、無料枠のコンピュート時間制限を避けるため Sheets へ移行。
+関数名・返り値は従来のまま保つので、app.py / services.py はほぼ変更不要。
 
-- 接続先: 環境変数 DATABASE_URL（Neon Postgres）。.env に置く（リポジトリには含めない）。
-- 日付は date 型で保持。「今日」は JST 基準（today() 参照）。
-- status は 'done'(完了) / 'small'(最低限行動) / 'none'(行動してない) の3値。
-  未記入は「Entry レコードが存在しない」状態で表す。
+- 認証: Google サービスアカウント。
+  Streamlit Secrets の `[gcp_service_account]`（study-tracker と同じものを再利用）
+  もしくは 環境変数 `GCP_SERVICE_ACCOUNT_JSON`（JSON文字列）。
+- 対象シート: Secrets の `spreadsheet_id` または `spreadsheet_name`
+  （env の `SPREADSHEET_ID` / `SPREADSHEET_NAME` も可）。
+- タブ: routines / entries / daily_logs / weight_logs / settings（init_db で自動作成）。
+- 保存はすべて RAW 文字列。日付は 'YYYY-MM-DD'。JSTの今日は today()。
 """
 
+import json
 import os
 from datetime import date, datetime, timedelta, timezone
 
-from dotenv import load_dotenv
-from sqlalchemy import (
-    Boolean,
-    Date,
-    DateTime,
-    Float,
-    ForeignKey,
-    Integer,
-    String,
-    Text,
-    UniqueConstraint,
-    create_engine,
-    delete,
-    select,
-    text,
-)
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
-
-load_dotenv()
+import gspread
+from google.oauth2.service_account import Credentials
 
 JST = timezone(timedelta(hours=9))
-
-# 有効な status 値（未記入は Entry 不在で表すのでここには含めない）
 VALID_STATUSES = ("done", "small", "none")
+VALID_MOODS = ("good", "bad")
 
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+
+# タブ名 → ヘッダ
+SHEETS = {
+    "routines": ["id", "name", "sort_order", "archived", "archived_at", "created_at"],
+    "entries": ["id", "routine_id", "date", "status", "note"],
+    "daily_logs": ["date", "sleep_hours", "mood", "mood_morning", "mood_night"],
+    "weight_logs": ["date", "weight"],
+    "settings": ["key", "value"],
+}
+
+
+# --- 時刻・変換ヘルパー -----------------------------------------------------
 
 def today() -> date:
-    """JST の今日を date で返す。"""
     return datetime.now(JST).date()
 
 
 def now_jst() -> datetime:
-    """JST の現在時刻（created_at / archived_at 用、naive で保持）。"""
     return datetime.now(JST).replace(tzinfo=None)
 
 
-# --- 接続 -------------------------------------------------------------------
+def _iso(d) -> str:
+    return d.isoformat() if hasattr(d, "isoformat") else str(d)
 
-def _database_url() -> str:
-    # ローカル: .env / 環境変数。Streamlit Cloud: Secrets（環境変数にも露出するが念のため両対応）。
-    url = os.getenv("DATABASE_URL")
-    if not url:
-        try:
-            import streamlit as st
 
-            url = st.secrets.get("DATABASE_URL")
-        except Exception:
-            url = None
-    if not url:
+def _pdate(s):
+    s = str(s)[:10]
+    return date.fromisoformat(s) if s else None
+
+
+def _pfloat(s):
+    if s in (None, ""):
+        return None
+    try:
+        return float(s)
+    except (TypeError, ValueError):
+        return None
+
+
+def _pbool(s) -> bool:
+    return str(s).strip().upper() in ("TRUE", "1", "YES")
+
+
+def _pstr(s):
+    """空文字/None は None に、それ以外は str に。"""
+    return str(s) if s not in (None, "") else None
+
+
+# --- 認証・接続（遅延・プロセス内キャッシュ）-------------------------------
+_ss = None  # 開いたスプレッドシート（gspread）を使い回す
+
+
+def _conf_and_target():
+    """(サービスアカウント情報dict, spreadsheet_id, spreadsheet_name) を返す。"""
+    conf = sid = sname = None
+    try:
+        import streamlit as st
+
+        if "gcp_service_account" in st.secrets:
+            conf = dict(st.secrets["gcp_service_account"])
+            sid = st.secrets.get("spreadsheet_id")
+            sname = st.secrets.get("spreadsheet_name")
+    except Exception:
+        pass
+    if conf is None:
+        raw = os.getenv("GCP_SERVICE_ACCOUNT_JSON")
+        if raw:
+            conf = json.loads(raw)
+    sid = sid or os.getenv("SPREADSHEET_ID")
+    sname = sname or os.getenv("SPREADSHEET_NAME")
+    if conf is None:
         raise RuntimeError(
-            "DATABASE_URL が設定されていません。ローカルは .env、Streamlit Cloud は Secrets に"
-            " Neon の接続文字列を設定してください（.env.example 参照）。"
+            "Google認証情報が見つかりません。Streamlit Secrets の [gcp_service_account]"
+            "（または環境変数 GCP_SERVICE_ACCOUNT_JSON）を設定してください。"
         )
-    return url
+    if not (sid or sname):
+        raise RuntimeError(
+            "対象スプレッドシートが未指定です。Secrets に spreadsheet_id か spreadsheet_name"
+            "（または env SPREADSHEET_ID / SPREADSHEET_NAME）を設定してください。"
+        )
+    return conf, sid, sname
 
 
-# engine / Session はモジュール初回 import 時に1つだけ作る。
-_engine = create_engine(_database_url(), pool_pre_ping=True)
-Session = sessionmaker(bind=_engine, expire_on_commit=False)
+def _spreadsheet():
+    global _ss
+    if _ss is None:
+        conf, sid, sname = _conf_and_target()
+        gc = gspread.authorize(Credentials.from_service_account_info(conf, scopes=SCOPES))
+        _ss = gc.open_by_key(sid) if sid else gc.open(sname)
+    return _ss
 
 
-# --- モデル -----------------------------------------------------------------
-
-class Base(DeclarativeBase):
-    pass
+def _ws(name):
+    return _spreadsheet().worksheet(name)
 
 
-class Routine(Base):
-    __tablename__ = "routines"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    name: Mapped[str] = mapped_column(String(255), nullable=False)
-    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    archived: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    archived_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_jst)
-
-
-class Entry(Base):
-    __tablename__ = "entries"
-    __table_args__ = (UniqueConstraint("routine_id", "date", name="uq_routine_date"),)
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    routine_id: Mapped[int] = mapped_column(
-        ForeignKey("routines.id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
-    status: Mapped[str] = mapped_column(String(10), nullable=False)  # done|small|none
-    note: Mapped[str | None] = mapped_column(Text, nullable=True)
-
-
-class DailyLog(Base):
-    """1日ごとのコンディション記録（睡眠時間・気分）。ルーティンとは独立。"""
-
-    __tablename__ = "daily_logs"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    date: Mapped[date] = mapped_column(Date, nullable=False, unique=True, index=True)
-    sleep_hours: Mapped[float | None] = mapped_column(Float, nullable=True)
-    mood: Mapped[str | None] = mapped_column(String(10), nullable=True)  # 旧・単一気分（互換用）
-    mood_morning: Mapped[str | None] = mapped_column(String(10), nullable=True)  # 'good'|'bad'
-    mood_night: Mapped[str | None] = mapped_column(String(10), nullable=True)  # 'good'|'bad'
-
-
-class WeightLog(Base):
-    """1日ごとの体重記録（kg）。"""
-
-    __tablename__ = "weight_logs"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    date: Mapped[date] = mapped_column(Date, nullable=False, unique=True, index=True)
-    weight: Mapped[float] = mapped_column(Float, nullable=False)
-
-
-class Settings(Base):
-    """汎用の設定を key-value で保持（体重の目標体重・目標日など）。"""
-
-    __tablename__ = "settings"
-
-    key: Mapped[str] = mapped_column(String(64), primary_key=True)
-    value: Mapped[str] = mapped_column(Text, nullable=False)
-
-
-def init_db() -> None:
-    """全テーブルを作成（既存ならスキップ）。init_db.py から呼ぶ。"""
-    Base.metadata.create_all(_engine)
+def _records(name):
+    return _ws(name).get_all_records()
 
 
 def ping() -> None:
-    """DBへ軽い疎通確認（SELECT 1）。接続不可なら OperationalError を送出。"""
-    with Session() as s:
-        s.execute(text("SELECT 1"))
+    """疎通確認（スプレッドシートを開けるか）。失敗時は例外。"""
+    _spreadsheet()
 
 
-# --- Routine の CRUD --------------------------------------------------------
+def init_db() -> None:
+    """必要なタブを作成しヘッダを整える（冪等）。"""
+    ss = _spreadsheet()
+    existing = {w.title for w in ss.worksheets()}
+    for name, headers in SHEETS.items():
+        if name not in existing:
+            ws = ss.add_worksheet(title=name, rows=2000, cols=max(6, len(headers)))
+            ws.update(range_name="A1", values=[headers], value_input_option="RAW")
+        else:
+            ws = ss.worksheet(name)
+            if not ws.row_values(1):
+                ws.update(range_name="A1", values=[headers], value_input_option="RAW")
 
-def list_routines(include_archived: bool = False) -> list[Routine]:
-    """ルーティン一覧を sort_order, id 順で返す。既定では現役のみ。"""
-    with Session() as s:
-        stmt = select(Routine)
-        if not include_archived:
-            stmt = stmt.where(Routine.archived.is_(False))
-        stmt = stmt.order_by(Routine.sort_order, Routine.id)
-        return list(s.scalars(stmt).all())
+
+def _append(name, row_values):
+    _ws(name).append_row(row_values, value_input_option="RAW")
 
 
-def add_routine(name: str, sort_order: int | None = None) -> Routine:
-    """ルーティンを追加して返す。sort_order 省略時は末尾に置く。"""
+def _update_row(name, rownum, ncols, row_values):
+    last_col = chr(ord("A") + ncols - 1)
+    _ws(name).update(
+        range_name=f"A{rownum}:{last_col}{rownum}",
+        values=[row_values],
+        value_input_option="RAW",
+    )
+
+
+# --- Routine ---------------------------------------------------------------
+
+class _Row:
+    """属性アクセスできる軽量レコード（ORM互換の見た目）。"""
+
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+
+def list_routines(include_archived: bool = False) -> list:
+    out = []
+    for r in _records("routines"):
+        if str(r.get("id")).strip() == "":
+            continue
+        archived = _pbool(r.get("archived"))
+        if not include_archived and archived:
+            continue
+        out.append(
+            _Row(
+                id=int(r["id"]),
+                name=str(r.get("name", "")),
+                sort_order=int(r.get("sort_order") or 0),
+                archived=archived,
+                archived_at=_pstr(r.get("archived_at")),
+                created_at=_pstr(r.get("created_at")),
+            )
+        )
+    out.sort(key=lambda x: (x.sort_order, x.id))
+    return out
+
+
+def add_routine(name: str, sort_order: int | None = None):
     name = (name or "").strip()
     if not name:
         raise ValueError("ルーティン名が空です。")
-    with Session() as s:
-        if sort_order is None:
-            current_max = s.scalar(select(Routine.sort_order).order_by(Routine.sort_order.desc()))
-            sort_order = (current_max or 0) + 1
-        r = Routine(name=name, sort_order=sort_order)
-        s.add(r)
-        s.commit()
-        s.refresh(r)
-        return r
+    recs = _records("routines")
+    ids = [int(r["id"]) for r in recs if str(r.get("id")).strip().lstrip("-").isdigit()]
+    new_id = (max(ids) + 1) if ids else 1
+    if sort_order is None:
+        orders = [int(r.get("sort_order") or 0) for r in recs]
+        sort_order = (max(orders) + 1) if orders else 1
+    _append(
+        "routines",
+        [new_id, name, int(sort_order), "FALSE", "", now_jst().strftime("%Y-%m-%d %H:%M:%S")],
+    )
+    return _Row(id=new_id, name=name, sort_order=int(sort_order), archived=False)
 
 
-def update_routine(
-    routine_id: int,
-    *,
-    name: str | None = None,
-    sort_order: int | None = None,
-    archived: bool | None = None,
-) -> None:
-    """ルーティンの属性を部分更新する。archived の切替で archived_at も整合させる。"""
-    with Session() as s:
-        r = s.get(Routine, routine_id)
-        if r is None:
-            return
-        if name is not None:
-            new_name = name.strip()
-            if new_name:
-                r.name = new_name
-        if sort_order is not None:
-            r.sort_order = int(sort_order)
-        if archived is not None and archived != r.archived:
-            r.archived = archived
-            r.archived_at = now_jst() if archived else None
-        s.commit()
-
-
-# --- Entry の CRUD（upsert / 取り消し）-------------------------------------
-
-def set_entry(routine_id: int, day: date, status: str | None) -> None:
-    """指定日のルーティンの記録を設定する。
-
-    - status が VALID_STATUSES のいずれか → upsert（無ければ作成、有れば更新）
-    - status が None → その日の記録を削除（＝未記入に戻す）
-    """
-    with Session() as s:
-        existing = s.scalar(
-            select(Entry).where(Entry.routine_id == routine_id, Entry.date == day)
+def update_routine(routine_id, *, name=None, sort_order=None, archived=None) -> None:
+    recs = _records("routines")
+    for i, r in enumerate(recs):
+        if str(r.get("id")).strip() == "" or int(r["id"]) != int(routine_id):
+            continue
+        rownum = i + 2
+        new_name = name.strip() if (name is not None and name.strip()) else str(r.get("name", ""))
+        new_sort = int(sort_order) if sort_order is not None else int(r.get("sort_order") or 0)
+        cur_arch = _pbool(r.get("archived"))
+        new_arch = cur_arch if archived is None else bool(archived)
+        arch_at = _pstr(r.get("archived_at")) or ""
+        if archived is not None and new_arch != cur_arch:
+            arch_at = now_jst().strftime("%Y-%m-%d %H:%M:%S") if new_arch else ""
+        created = _pstr(r.get("created_at")) or ""
+        _update_row(
+            "routines",
+            rownum,
+            6,
+            [int(r["id"]), new_name, new_sort, "TRUE" if new_arch else "FALSE", arch_at, created],
         )
-        if status is None:
-            if existing is not None:
-                s.delete(existing)
-                s.commit()
-            return
-        if status not in VALID_STATUSES:
-            raise ValueError(f"不正な status: {status!r}")
-        if existing is None:
-            s.add(Entry(routine_id=routine_id, date=day, status=status))
-        else:
-            existing.status = status
-        s.commit()
+        return
 
 
-def get_entries_for_day(day: date) -> dict[int, str]:
-    """指定日の {routine_id: status} を返す。記録のないルーティンは含まれない。"""
-    with Session() as s:
-        rows = s.execute(
-            select(Entry.routine_id, Entry.status).where(Entry.date == day)
-        ).all()
-        return {rid: status for rid, status in rows}
+# --- Entry -----------------------------------------------------------------
+
+def set_entry(routine_id, day: date, status) -> None:
+    recs = _records("entries")
+    diso = _iso(day)
+    rownum = existing = None
+    for i, r in enumerate(recs):
+        if str(r.get("routine_id")).strip() == "":
+            continue
+        if int(r["routine_id"]) == int(routine_id) and str(r.get("date"))[:10] == diso:
+            rownum, existing = i + 2, r
+            break
+    if status is None:
+        if rownum:
+            _ws("entries").delete_rows(rownum)
+        return
+    if status not in VALID_STATUSES:
+        raise ValueError(f"不正な status: {status!r}")
+    if rownum:
+        _update_row(
+            "entries", rownum, 5,
+            [existing["id"], int(routine_id), diso, status, _pstr(existing.get("note")) or ""],
+        )
+    else:
+        ids = [int(r["id"]) for r in recs if str(r.get("id")).strip().lstrip("-").isdigit()]
+        new_id = (max(ids) + 1) if ids else 1
+        _append("entries", [new_id, int(routine_id), diso, status, ""])
 
 
-def get_entries_range(start: date, end: date) -> list[tuple[int, date, str]]:
-    """[start, end]（両端含む）の全エントリを (routine_id, date, status) で返す。"""
-    with Session() as s:
-        rows = s.execute(
-            select(Entry.routine_id, Entry.date, Entry.status)
-            .where(Entry.date >= start, Entry.date <= end)
-            .order_by(Entry.date)
-        ).all()
-        return [(rid, d, status) for rid, d, status in rows]
+def get_entries_for_day(day: date) -> dict:
+    diso = _iso(day)
+    return {
+        int(r["routine_id"]): str(r["status"])
+        for r in _records("entries")
+        if str(r.get("routine_id")).strip() != "" and str(r.get("date"))[:10] == diso
+    }
 
 
-def get_all_entries() -> list[tuple[int, date, str]]:
-    """全期間の全エントリを (routine_id, date, status) で返す（集計用）。"""
-    with Session() as s:
-        rows = s.execute(
-            select(Entry.routine_id, Entry.date, Entry.status).order_by(Entry.date)
-        ).all()
-        return [(rid, d, status) for rid, d, status in rows]
+def get_entries_range(start: date, end: date) -> list:
+    s, e = _iso(start), _iso(end)
+    out = []
+    for r in _records("entries"):
+        if str(r.get("routine_id")).strip() == "":
+            continue
+        d = str(r.get("date"))[:10]
+        if s <= d <= e:
+            out.append((int(r["routine_id"]), _pdate(d), str(r["status"])))
+    return out
 
 
-# --- DailyLog（睡眠時間・気分）---------------------------------------------
+def get_all_entries() -> list:
+    out = []
+    for r in _records("entries"):
+        if str(r.get("routine_id")).strip() == "" or not r.get("date"):
+            continue
+        out.append((int(r["routine_id"]), _pdate(str(r.get("date"))[:10]), str(r["status"])))
+    return out
 
-VALID_MOODS = ("good", "bad")
 
+# --- DailyLog（睡眠・気分 朝/夜）------------------------------------------
 
-def get_daily_log(day: date) -> tuple[float | None, str | None, str | None]:
-    """指定日の (sleep_hours, mood_morning, mood_night) を返す。未記入は (None, None, None)。"""
-    with Session() as s:
-        r = s.scalar(select(DailyLog).where(DailyLog.date == day))
-        if r is None:
-            return (None, None, None)
-        return (r.sleep_hours, r.mood_morning, r.mood_night)
+def get_daily_log(day: date):
+    diso = _iso(day)
+    for r in _records("daily_logs"):
+        if str(r.get("date"))[:10] == diso:
+            return (_pfloat(r.get("sleep_hours")), _pstr(r.get("mood_morning")), _pstr(r.get("mood_night")))
+    return (None, None, None)
 
 
 def _set_daily_field(day: date, field: str, value) -> None:
-    """DailyLog の1フィールドを upsert する。全フィールドが空になれば行を削除。"""
-    with Session() as s:
-        r = s.scalar(select(DailyLog).where(DailyLog.date == day))
-        if r is None:
-            if value is None:
-                return
-            r = DailyLog(date=day)
-            setattr(r, field, value)
-            s.add(r)
-            s.commit()
+    recs = _records("daily_logs")
+    diso = _iso(day)
+    rownum = rec = None
+    for i, r in enumerate(recs):
+        if str(r.get("date"))[:10] == diso:
+            rownum, rec = i + 2, r
+            break
+    cur = {
+        "date": diso,
+        "sleep_hours": "" if rec is None else (_pfloat(rec.get("sleep_hours")) if _pfloat(rec.get("sleep_hours")) is not None else ""),
+        "mood": "" if rec is None else (_pstr(rec.get("mood")) or ""),
+        "mood_morning": "" if rec is None else (_pstr(rec.get("mood_morning")) or ""),
+        "mood_night": "" if rec is None else (_pstr(rec.get("mood_night")) or ""),
+    }
+    cur[field] = "" if value is None else value
+    all_empty = all(cur[k] == "" for k in ("sleep_hours", "mood", "mood_morning", "mood_night"))
+    if rec is None:
+        if all_empty:
             return
-        setattr(r, field, value)
-        if (
-            r.sleep_hours is None
-            and r.mood is None
-            and r.mood_morning is None
-            and r.mood_night is None
-        ):
-            s.delete(r)
-        s.commit()
+        _append(
+            "daily_logs",
+            [cur["date"], cur["sleep_hours"], cur["mood"], cur["mood_morning"], cur["mood_night"]],
+        )
+        return
+    if all_empty:
+        _ws("daily_logs").delete_rows(rownum)
+        return
+    _update_row(
+        "daily_logs", rownum, 5,
+        [cur["date"], cur["sleep_hours"], cur["mood"], cur["mood_morning"], cur["mood_night"]],
+    )
 
 
-def set_sleep(day: date, hours: float | None) -> None:
-    """睡眠時間（時間）を保存。None で記録取消。"""
-    _set_daily_field(day, "sleep_hours", hours)
+def set_sleep(day: date, hours) -> None:
+    _set_daily_field(day, "sleep_hours", None if hours is None else float(hours))
 
 
-def _set_mood_field(day: date, field: str, mood: str | None) -> None:
+def _set_mood_field(day: date, field: str, mood) -> None:
     if mood is not None and mood not in VALID_MOODS:
         raise ValueError(f"不正な mood: {mood!r}")
     _set_daily_field(day, field, mood)
 
 
-def set_mood_morning(day: date, mood: str | None) -> None:
-    """朝の気分（'good'|'bad'）を保存。None で記録取消。"""
+def set_mood_morning(day: date, mood) -> None:
     _set_mood_field(day, "mood_morning", mood)
 
 
-def set_mood_night(day: date, mood: str | None) -> None:
-    """夜の気分（'good'|'bad'）を保存。None で記録取消。"""
+def set_mood_night(day: date, mood) -> None:
     _set_mood_field(day, "mood_night", mood)
 
 
-def get_daily_logs_range(
-    start: date, end: date
-) -> list[tuple[date, float | None, str | None, str | None]]:
-    """[start, end] の DailyLog を (date, sleep_hours, mood_morning, mood_night) で返す。"""
-    with Session() as s:
-        rows = s.execute(
-            select(
-                DailyLog.date,
-                DailyLog.sleep_hours,
-                DailyLog.mood_morning,
-                DailyLog.mood_night,
-            )
-            .where(DailyLog.date >= start, DailyLog.date <= end)
-            .order_by(DailyLog.date)
-        ).all()
-        return [(d, sh, mm, mn) for d, sh, mm, mn in rows]
+def get_daily_logs_range(start: date, end: date) -> list:
+    s, e = _iso(start), _iso(end)
+    out = []
+    for r in _records("daily_logs"):
+        d = str(r.get("date"))[:10]
+        if d and s <= d <= e:
+            out.append((_pdate(d), _pfloat(r.get("sleep_hours")), _pstr(r.get("mood_morning")), _pstr(r.get("mood_night"))))
+    out.sort(key=lambda t: t[0])
+    return out
 
 
-# --- WeightLog（体重）------------------------------------------------------
+# --- WeightLog -------------------------------------------------------------
 
-def get_weight_logs() -> list[tuple[date, float]]:
-    """全期間の体重を (date, weight) で date 昇順に返す。"""
-    with Session() as s:
-        rows = s.execute(
-            select(WeightLog.date, WeightLog.weight).order_by(WeightLog.date)
-        ).all()
-        return [(d, w) for d, w in rows]
-
-
-def set_weight(day: date, weight: float | None) -> None:
-    """体重を保存（upsert）。weight が None ならその日の記録を削除。"""
-    with Session() as s:
-        r = s.scalar(select(WeightLog).where(WeightLog.date == day))
-        if weight is None:
-            if r is not None:
-                s.delete(r)
-                s.commit()
-            return
-        if r is None:
-            s.add(WeightLog(date=day, weight=weight))
-        else:
-            r.weight = weight
-        s.commit()
+def get_weight_logs() -> list:
+    out = []
+    for r in _records("weight_logs"):
+        w = _pfloat(r.get("weight"))
+        if r.get("date") and w is not None:
+            out.append((_pdate(str(r.get("date"))[:10]), w))
+    out.sort(key=lambda t: t[0])
+    return out
 
 
-# --- Settings（key-value）---------------------------------------------------
+def set_weight(day: date, weight) -> None:
+    recs = _records("weight_logs")
+    diso = _iso(day)
+    rownum = None
+    for i, r in enumerate(recs):
+        if str(r.get("date"))[:10] == diso:
+            rownum = i + 2
+            break
+    if weight is None:
+        if rownum:
+            _ws("weight_logs").delete_rows(rownum)
+        return
+    if rownum:
+        _update_row("weight_logs", rownum, 2, [diso, float(weight)])
+    else:
+        _append("weight_logs", [diso, float(weight)])
 
-def get_setting(key: str) -> str | None:
-    with Session() as s:
-        r = s.scalar(select(Settings).where(Settings.key == key))
-        return r.value if r else None
+
+# --- Settings --------------------------------------------------------------
+
+def get_setting(key: str):
+    for r in _records("settings"):
+        if str(r.get("key")) == key:
+            return _pstr(r.get("value"))
+    return None
 
 
 def set_setting(key: str, value: str) -> None:
-    with Session() as s:
-        r = s.scalar(select(Settings).where(Settings.key == key))
-        if r is None:
-            s.add(Settings(key=key, value=value))
-        else:
-            r.value = value
-        s.commit()
+    recs = _records("settings")
+    rownum = None
+    for i, r in enumerate(recs):
+        if str(r.get("key")) == key:
+            rownum = i + 2
+            break
+    if rownum:
+        _update_row("settings", rownum, 2, [key, str(value)])
+    else:
+        _append("settings", [key, str(value)])
 
 
-def get_weight_goal() -> tuple[float | None, date | None]:
-    """(目標体重, 目標日) を返す。未設定は None。"""
+def get_weight_goal():
     w = get_setting("weight_target")
     d = get_setting("weight_target_date")
-    target_w = float(w) if w else None
-    target_d = date.fromisoformat(d) if d else None
-    return (target_w, target_d)
+    return (float(w) if w else None, date.fromisoformat(d) if d else None)
 
 
 def set_weight_goal(target_weight: float, target_date: date) -> None:

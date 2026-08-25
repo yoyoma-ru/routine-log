@@ -1,8 +1,10 @@
-"""テーブルを作成・確認するスクリプト。
+"""スプレッドシートのタブ（テーブル）を作成・確認するスクリプト。
 
-DATABASE_URL（.env の Neon Postgres）に対して全テーブルを作成する。
-通常の起動時には呼ばず、初回セットアップ時やスキーマ追加時に手動で実行する:
+通常はアプリ起動時に自動作成される（app.py の _bootstrap_schema）。
+手動で用意したい場合のみ、認証情報を環境変数に入れて実行する:
 
+    export GCP_SERVICE_ACCOUNT_JSON='{...service account json...}'
+    export SPREADSHEET_NAME='routine-log-db'   # もしくは SPREADSHEET_ID
     python init_db.py
 """
 from db import init_db
@@ -10,7 +12,7 @@ from db import init_db
 
 def main() -> None:
     init_db()
-    print("✅ テーブルを作成・確認しました")
+    print("✅ スプレッドシートのタブ（routines/entries/daily_logs/weight_logs/settings）を作成・確認しました")
 
 
 if __name__ == "__main__":
