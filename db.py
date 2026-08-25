@@ -27,6 +27,7 @@ from sqlalchemy import (
     create_engine,
     delete,
     select,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
@@ -138,6 +139,12 @@ class Settings(Base):
 def init_db() -> None:
     """全テーブルを作成（既存ならスキップ）。init_db.py から呼ぶ。"""
     Base.metadata.create_all(_engine)
+
+
+def ping() -> None:
+    """DBへ軽い疎通確認（SELECT 1）。接続不可なら OperationalError を送出。"""
+    with Session() as s:
+        s.execute(text("SELECT 1"))
 
 
 # --- Routine の CRUD --------------------------------------------------------

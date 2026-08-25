@@ -289,6 +289,21 @@ def _save_day(d, routines) -> None:
 st.markdown(HEATMAP_CSS, unsafe_allow_html=True)
 st.title("🌱 routine-log")
 
+# DB疎通チェック（接続不可なら生のトレースバックではなく分かりやすい案内を出す）
+try:
+    db.ping()
+except Exception as e:  # noqa: BLE001 - 接続系はまとめて拾って案内する
+    _msg = str(e)
+    if "quota" in _msg or "compute time" in _msg:
+        st.error(
+            "データベース（Neon 無料枠）のコンピュート時間を使い切ったため、接続できません。"
+            "月次の枠リセットを待つか、プラン変更／別DBへの移行が必要です。"
+        )
+    else:
+        st.error("データベースに接続できませんでした。少し時間をおいて再度お試しください。")
+    st.caption(f"詳細: {_msg[:200]}")
+    st.stop()
+
 tab_today, tab_heat, tab_weight, tab_manage = st.tabs(
     ["今日", "ヒートマップ", "体重", "管理"]
 )
