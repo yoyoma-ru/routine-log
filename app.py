@@ -28,9 +28,9 @@ except RuntimeError as e:
 
 
 # ---- 読み取りキャッシュ ----------------------------------------------------
-# Neon への往復を減らすため、読み取りは st.cache_data でキャッシュする。
-# 返り値は「素のデータ（tuple/namedtuple）」のみ（ORMオブジェクトはキャッシュしない）。
-# 書き込み後は各所で st.cache_data.clear() を呼び、最新を反映する。
+# Sheets API 呼び出しを減らすため、各シートは「1回だけ全読み」して st.cache_data で
+# キャッシュし、日付範囲の絞り込みは Python 側で行う（範囲違いで何度も全読みしない）。
+# 返り値は素データ（tuple/namedtuple）のみ。書き込み後は st.cache_data.clear() で最新化。
 RoutineView = namedtuple("RoutineView", "id name sort_order archived")
 
 
@@ -43,13 +43,13 @@ def _routines(include_archived: bool):
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def _entries_range(start, end):
-    return db.get_entries_range(start, end)
+def _entries_all():
+    return db.get_all_entries()  # [(routine_id, date, status)]
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def _daily_logs_range(start, end):
-    return db.get_daily_logs_range(start, end)
+def _daily_all():
+    return db.get_all_daily()  # [(date, sleep, mood_morning, mood_night)]
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -60,6 +60,16 @@ def _weight_logs():
 @st.cache_data(ttl=300, show_spinner=False)
 def _weight_goal():
     return db.get_weight_goal()
+
+
+def _entries_range(start, end):
+    return [(rid, d, s) for (rid, d, s) in _entries_all() if start <= d <= end]
+
+
+def _daily_logs_range(start, end):
+    out = [t for t in _daily_all() if start <= t[0] <= end]
+    out.sort(key=lambda t: t[0])
+    return out
 
 
 def _matrix(routines: list, days: int, end):

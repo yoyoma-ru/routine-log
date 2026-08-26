@@ -122,11 +122,7 @@ def _spreadsheet():
     return _ss
 
 
-def _ws(name):
-    return _spreadsheet().worksheet(name)
-
-
-def _retry(fn, tries: int = 4, base: float = 1.2):
+def _retry(fn, tries: int = 5, base: float = 1.5):
     """Sheets API のレート制限(429)や一時エラー(5xx)を指数バックオフでリトライ。"""
     for i in range(tries):
         try:
@@ -137,6 +133,26 @@ def _retry(fn, tries: int = 4, base: float = 1.2):
                 time.sleep(base * (i + 1))
                 continue
             raise
+
+
+# ワークシートのハンドルをキャッシュ（worksheet() 毎のメタデータ取得を1回に減らす）
+_ws_cache: dict = {}
+
+
+def _ws(name):
+    ws = _ws_cache.get(name)
+    if ws is None:
+        ss = _spreadsheet()
+        try:
+            for w in _retry(lambda: ss.worksheets()):  # 全タブを1回で取得しキャッシュ
+                _ws_cache[w.title] = w
+            ws = _ws_cache.get(name)
+        except Exception:
+            ws = None
+        if ws is None:  # フォールバック
+            ws = _retry(lambda: ss.worksheet(name))
+            _ws_cache[name] = ws
+    return ws
 
 
 def _records(name):
@@ -475,13 +491,18 @@ def set_daily_bulk(day: date, *, sleep=KEEP, mood_morning=KEEP, mood_night=KEEP)
     _update_row("daily_logs", rownum, 5, row)
 
 
-def get_daily_logs_range(start: date, end: date) -> list:
-    s, e = _iso(start), _iso(end)
+def get_all_daily() -> list:
+    """全 daily_logs を (date, sleep_hours, mood_morning, mood_night) で返す（範囲絞りは呼び出し側）。"""
     out = []
     for r in _records("daily_logs"):
         d = str(r.get("date"))[:10]
-        if d and s <= d <= e:
+        if d:
             out.append((_pdate(d), _pfloat(r.get("sleep_hours")), _pstr(r.get("mood_morning")), _pstr(r.get("mood_night"))))
+    return out
+
+
+def get_daily_logs_range(start: date, end: date) -> list:
+    out = [t for t in get_all_daily() if start <= t[0] <= end]
     out.sort(key=lambda t: t[0])
     return out
 
@@ -518,11 +539,16 @@ def set_weight(day: date, weight) -> None:
 
 # --- Settings --------------------------------------------------------------
 
+def get_all_settings() -> dict:
+    return {
+        str(r.get("key")): _pstr(r.get("value"))
+        for r in _records("settings")
+        if str(r.get("key")).strip() != ""
+    }
+
+
 def get_setting(key: str):
-    for r in _records("settings"):
-        if str(r.get("key")) == key:
-            return _pstr(r.get("value"))
-    return None
+    return get_all_settings().get(key)
 
 
 def set_setting(key: str, value: str) -> None:
@@ -539,8 +565,9 @@ def set_setting(key: str, value: str) -> None:
 
 
 def get_weight_goal():
-    w = get_setting("weight_target")
-    d = get_setting("weight_target_date")
+    s = get_all_settings()  # 1回の読みで両方取得
+    w = s.get("weight_target")
+    d = s.get("weight_target_date")
     return (float(w) if w else None, date.fromisoformat(d) if d else None)
 
 
